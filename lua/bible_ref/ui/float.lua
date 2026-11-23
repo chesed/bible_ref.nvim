@@ -1,10 +1,17 @@
 --- lua/bible_ref/ui/float.lua
---- LSP-style floating window for displaying Bible verse previews.
---- Supports multi-version cycling: press <space> inside the float to switch versions.
+--- LSP-style floating window for Bible verse previews with version cycling.
+---
+--- Keymaps inside the float (normal mode):
+---   <Space> / <Tab>   next version
+---   <S-Tab>           previous version
+---   l                 open reference on logos.com
+---   q / <Esc>         close
 
 local M = {}
 
 local logos = require("bible_ref.logos")
+
+local FOOTER = "[Space/Tab] Next Version  [S-Tab] Prev Version  [l] Logos  [q/Esc] Close"
 
 -- ---------------------------------------------------------------------------
 -- Wrap `text` to lines of at most `width` characters.
@@ -31,66 +38,134 @@ local function wrap(text, width)
 end
 
 -- ---------------------------------------------------------------------------
---- Open an LSP-style floating window showing the verse preview.
---- Supports both:
----   M.show(ref_str, verse_text)
----   M.show(ref_str, book, chapter, verse, version_index)
---- @param ref_str       string       SBL-formatted reference (e.g. "Jas 3:1")
---- @param arg2          string       verse_text or canonical book name
---- @param arg3          number|nil   chapter (if multi-arg)
---- @param arg4          number|nil   verse (if multi-arg)
---- @param arg5          number|nil   version_index (if multi-arg)
-function M.show(ref_str, arg2, arg3, arg4, arg5)
-  local verse_text, book, chapter, verse, version_index
+-- Argument normalization
+-- ---------------------------------------------------------------------------
+
+--- Normalize the supported call signatures into a common shape:
+---   M.show(ref_table, initial_version_idx?)     — structured reference
+---   M.show(ref_str, verse_text)                 — v1 backward-compat
+---   M.show(ref_str, book, chapter, verse, initial_version_idx?)  — v1 multi-arg
+---@return table { ref?, ref_str, preset_text?, initial_idx? }
+local function normalize_args(arg1, arg2, arg3, arg4, arg5)
+  local sbl = require("bible_ref.sbl")
+
+  if type(arg1) == "table" then
+    local ref = arg1
+    return {
+      ref         = ref,
+      ref_str     = sbl.format({
+        book = ref.book, chapter = ref.chapter,
+        verse_start = ref.verse_start, verse_end = ref.verse_end,
+      }),
+      initial_idx = arg2,
+    }
+  end
+
   if type(arg2) == "string" and (arg3 == nil or type(arg3) ~= "number") then
-    -- Called as M.show(ref_str, verse_text)
-    verse_text    = arg2
-    version_index = 1
+    -- v1: M.show(ref_str, verse_text)
+    return { ref_str = arg1, preset_text = arg2, initial_idx = nil }
+  end
+
+  -- v1: M.show(ref_str, book, chapter, verse, initial_version_idx?)
+  local ref = { book = arg2, chapter = arg3, verse_start = arg4 }
+  return {
+    ref         = ref,
+    ref_str     = arg1,
+    initial_idx = arg5,
+  }
+end
+
+-- ---------------------------------------------------------------------------
+-- Public API
+-- ---------------------------------------------------------------------------
+
+--- Open the floating verse preview.
+---
+--- Preferred:  M.show({ book, chapter, verse_start, verse_end? }, initial_version_idx?)
+--- Compat:     M.show(ref_str, verse_text)
+---
+---@param arg1 table|string  reference table, or SBL reference string
+---@param arg2 any           see module docs
+function M.show(arg1, arg2, arg3, arg4, arg5)
+  local cfg = require("bible_ref.config")
+  local db  = require("bible_ref.db")
+
+  local spec = normalize_args(arg1, arg2, arg3, arg4, arg5)
+  local ref  = spec.ref
+
+  -- Resolve the starting version (accepts index, tag, or nil = current)
+  local versions = cfg.get_versions()
+  local start_idx
+  if type(spec.initial_idx) == "string" then
+    start_idx = cfg.find_version_index(spec.initial_idx) or cfg.get_current_version_index()
+  elseif type(spec.initial_idx) == "number" and spec.initial_idx >= 1
+      and spec.initial_idx <= #versions then
+    start_idx = spec.initial_idx
   else
-    book          = arg2
-    chapter       = arg3
-    verse         = arg4
-    version_index = arg5 or 1
-    local db      = require("bible_ref.db")
-    verse_text    = db.lookup(version_index, book, chapter, verse)
+    start_idx = cfg.get_current_version_index()
+  end
+  local start_version = cfg.get_version(start_idx)
+
+  -- Fetch the verse (or range) text for the starting version
+  local function verse_text_for(tag)
+    if ref.verse_end and ref.verse_end ~= ref.verse_start then
+      return db.lookup_range(tag, ref.book, ref.chapter, ref.verse_start, ref.verse_end)
+    end
+    return db.lookup(tag, ref.book, ref.chapter, ref.verse_start)
   end
 
-  -- Determine window size
-  local max_width = math.min(70, vim.o.columns - 4)
+  local max_content_width = math.min(80, vim.o.columns - 4)
 
-  -- Build content lines
-  local body_lines = wrap(verse_text or "", max_width - 2)
+  --- Build the full content lines + window dimensions for a given version.
+  local function build_content(text, version)
+    local body   = wrap(text or "", max_content_width - 2)
+    local header
+    if version then
+      header = spec.ref_str .. "  [Version: " .. tostring(version.tag) .. "]"
+    else
+      header = spec.ref_str
+    end
 
-  -- Footer
-  local footer = string.format("[%s] Open in Logos.com    [q/Esc] Close", ref_str)
+    local content = { " " .. header, "" }
+    for _, line in ipairs(body) do
+      content[#content + 1] = " " .. line
+    end
+    content[#content + 1] = ""
+    content[#content + 1] = " " .. (ref and FOOTER or "[l] Logos    [q/Esc] Close")
 
-  local content = {}
-  table.insert(content, " " .. ref_str)                    -- header (indent 1)
-  table.insert(content, "")                                 -- blank line before body
-  for _, l in ipairs(body_lines) do
-    table.insert(content, " " .. l)
+    -- Dynamic width: fit the longest line, clamped to sane bounds
+    local longest = #header
+    for _, line in ipairs(body) do
+      if #line > longest then longest = #line end
+    end
+    local width = math.max(40, math.min(longest + 4, max_content_width))
+    return content, width, #content
   end
-  table.insert(content, "")
-  table.insert(content, " " .. footer)
 
-  local height = #content
-  local width  = max_width
+  local start_text
+  if spec.preset_text then
+    start_text = spec.preset_text
+  elseif ref then
+    start_text = verse_text_for(start_version.tag)
+  else
+    start_text = ""
+  end
 
-  -- Create a scratch buffer
+  local content, width, height = build_content(start_text, start_version)
+
+  -- Scratch buffer
   local buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, content)
   vim.api.nvim_set_option_value("bufhidden", "wipe",     { buf = buf })
   vim.api.nvim_set_option_value("modifiable", false,     { buf = buf })
   vim.api.nvim_set_option_value("filetype", "bible_ref", { buf = buf })
 
-  -- Store version and reference info in buffer-local variables for keymap access
-  vim.b[buf].bible_ref_version = version_index
-  vim.b[buf].bible_ref_book    = book
-  vim.b[buf].bible_ref_chapter = chapter
-  vim.b[buf].bible_ref_verse   = verse
-  vim.b[buf].bible_ref_str     = ref_str
+  -- Buffer-local state for the keymaps
+  vim.b[buf].version_index = start_idx
+  vim.b[buf].bible_ref_ref = ref
+  vim.b[buf].bible_ref_str = spec.ref_str
 
-  -- Open the floating window
+  -- Floating window
   local win = vim.api.nvim_open_win(buf, true, {
     relative = "cursor",
     row      = 1,
@@ -102,15 +177,14 @@ function M.show(ref_str, arg2, arg3, arg4, arg5)
     zindex   = 50,
   })
 
-  -- Window options
-  vim.api.nvim_set_option_value("wrap",        true,  { win = win })
-  vim.api.nvim_set_option_value("cursorline",  false, { win = win })
-  vim.api.nvim_set_option_value("foldenable",  false, { win = win })
+  vim.api.nvim_set_option_value("wrap",       true,  { win = win })
+  vim.api.nvim_set_option_value("cursorline", false, { win = win })
+  vim.api.nvim_set_option_value("foldenable", false, { win = win })
 
-  -- Highlight header bold if possible
-  vim.api.nvim_buf_add_highlight(buf, -1, "Title", 0, 0, -1)
+  -- Highlight the header line
+  vim.api.nvim_buf_add_highlight(buf, -1, "Title", 0, 0, 1)
 
-  -- Keymaps: close
+  -- Close
   local close = function()
     if vim.api.nvim_win_is_valid(win) then
       vim.api.nvim_win_close(win, true)
@@ -119,53 +193,54 @@ function M.show(ref_str, arg2, arg3, arg4, arg5)
   vim.keymap.set("n", "q",     close, { buffer = buf, nowait = true, silent = true })
   vim.keymap.set("n", "<Esc>", close, { buffer = buf, nowait = true, silent = true })
 
-  -- Keymaps: open in Logos
+  -- Logos
   vim.keymap.set("n", "l", function()
     close()
-    logos.open(ref_str)
+    logos.open(spec.ref_str)
   end, { buffer = buf, nowait = true, silent = true })
 
-  -- Keymaps: cycle versions on <Space> (when book/chapter/verse are known)
-  vim.keymap.set("n", "<Space>", function()
-    local b_book    = vim.b[buf].bible_ref_book
-    local b_chapter = vim.b[buf].bible_ref_chapter
-    local b_verse   = vim.b[buf].bible_ref_verse
-    if not b_book or not b_chapter or not b_verse then
-      return
+  -- Version cycling (only possible when we have a structured reference)
+  if ref then
+    local function cycle(direction)
+      local n = #versions
+      if n < 2 then
+        vim.notify("[bible_ref] Only one dataset is available", vim.log.levels.INFO)
+        return
+      end
+      local cur = vim.b[buf].version_index or cfg.get_current_version_index()
+      local next_idx = direction > 0
+        and cfg.next_version_index(cur)
+        or cfg.prev_version_index(cur)
+      local v    = cfg.get_version(next_idx)
+      local text = verse_text_for(v.tag)
+
+      local new_content, new_width, new_height = build_content(text, v)
+
+      vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
+      vim.api.nvim_buf_set_lines(buf, 0, -1, false, new_content)
+      vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
+
+      vim.b[buf].version_index = next_idx
+      cfg.set_current_version_index(next_idx) -- keep global state in sync
+
+      vim.api.nvim_win_set_config(win, {
+        width  = new_width,
+        height = new_height,
+      })
     end
 
-    local ver_idx = vim.b[buf].bible_ref_version or 1
-    local ok_cfg, config = pcall(require, "bible_ref.config")
-    local db = require("bible_ref.db")
-    local next_ver = (ok_cfg and config.next_version) and config.next_version(ver_idx) or 1
-
-    local new_text = db.lookup(next_ver, b_book, b_chapter, b_verse)
-    if not new_text then
-      vim.notify("[bible_ref] Verse not found in version " .. tostring(next_ver), vim.log.levels.WARN)
-      return
-    end
-
-    local new_body = wrap(new_text, max_width - 2)
-    local new_content = {}
-    table.insert(new_content, " " .. ref_str)
-    table.insert(new_content, "")
-    for _, l in ipairs(new_body) do
-      table.insert(new_content, " " .. l)
-    end
-    table.insert(new_content, "")
-    table.insert(new_content, " " .. footer)
-
-    vim.api.nvim_set_option_value("modifiable", true, { buf = buf })
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, new_content)
-    vim.api.nvim_set_option_value("modifiable", false, { buf = buf })
-
-    vim.b[buf].bible_ref_version = next_ver
-  end, { buffer = buf, nowait = true, silent = true })
+    vim.keymap.set("n", "<Space>", function() cycle(1)  end,
+      { buffer = buf, nowait = true, silent = true, desc = "bible_ref: next version" })
+    vim.keymap.set("n", "<Tab>",   function() cycle(1)  end,
+      { buffer = buf, nowait = true, silent = true, desc = "bible_ref: next version" })
+    vim.keymap.set("n", "<S-Tab>", function() cycle(-1) end,
+      { buffer = buf, nowait = true, silent = true, desc = "bible_ref: previous version" })
+  end
 
   -- Auto-close when focus leaves the float
   vim.api.nvim_create_autocmd("BufLeave", {
-    buffer  = buf,
-    once    = true,
+    buffer = buf,
+    once   = true,
     callback = function()
       if vim.api.nvim_win_is_valid(win) then
         vim.api.nvim_win_close(win, true)

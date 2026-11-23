@@ -123,28 +123,81 @@ check_parse("(cf. Jas 3:1)",      "James",          3, 1)
 check_parse("[1 Cor 4:2]",        "1 Corinthians",  4, 2)
 
 -- ---------------------------------------------------------------------------
+-- Tests: Version registry & rotation (config.lua)
+-- ---------------------------------------------------------------------------
+-- Hermetic: build a temporary data directory so the suite never depends on
+-- which datasets happen to live in the real data/ folder.
+section("Version Registry & Rotation (hermetic data dir)")
+
+local cfg = require("bible_ref.config")
+
+local data_dir = vim.fn.tempname()
+assert(vim.fn.mkdir(data_dir, "p") == 1)
+
+local function write_dataset(filename, obj)
+  local f = io.open(data_dir .. "/" .. filename, "w")
+  f:write(vim.json.encode(obj))
+  f:close()
+end
+
+write_dataset("bible.json", {
+  ["James 1:1"]         = "James, a servant of God and of the Lord Jesus Christ.",
+  ["James 1:2"]         = "Count it all joy, my brothers, when you meet trials of various kinds,",
+  ["James 1:3"]         = "for you know that the testing of your faith produces steadfastness.",
+  ["1 Corinthians 4:2"] = "Moreover, it is required of stewards that they be found faithful.",
+  ["Genesis 1:1"]       = "In the beginning, God created the heavens and the earth.",
+})
+
+write_dataset("bible_testb.json", {
+  -- Same references, different text; deliberately NO Genesis (OT absent)
+  ["James 1:1"]         = "TESTB: James 1:1 text.",
+  ["James 1:2"]         = "TESTB: James 1:2 text.",
+  ["James 1:3"]         = "TESTB: James 1:3 text.",
+  ["1 Corinthians 4:2"] = "TESTB: 1 Corinthians 4:2 text.",
+})
+
+cfg.setup({ data_dir = data_dir })
+local versions = cfg.get_versions()
+
+ok("discovered exactly 2 versions (bible.json, bible_testb.json)",
+  #versions == 2, "got: " .. tostring(#versions))
+
+ok("first version tagged ESV (bible.json)",
+  versions[1] and versions[1].tag == "ESV",
+  "got: " .. tostring(versions[1] and versions[1].tag))
+
+ok("TESTB discovered (bible_testb.json → uppercased tag)",
+  cfg.find_version_index("TESTB") ~= nil)
+
+ok("next_version_index wraps N → 1",
+  cfg.next_version_index(#versions) == 1,
+  "got: " .. tostring(cfg.next_version_index(#versions)))
+
+ok("prev_version_index wraps 1 → N",
+  cfg.prev_version_index(1) == #versions,
+  "got: " .. tostring(cfg.prev_version_index(1)))
+
+ok("next from 1 → 2",
+  cfg.next_version_index(1) == 2,
+  "got: " .. tostring(cfg.next_version_index(1)))
+
+ok("set_version('testb') (case-insensitive)",
+  cfg.set_version("testb") == true)
+
+ok("current index follows set_version",
+  cfg.get_current_version_index() == (cfg.find_version_index("TESTB") or -1))
+
+ok("set_version('bogus') returns false",
+  cfg.set_version("bogus") == false)
+
+cfg.set_version("ESV") -- restore primary as active
+
+-- ---------------------------------------------------------------------------
 -- Tests: Database lookup (db.lua)
 -- ---------------------------------------------------------------------------
 section("Database Lookups")
 
 local db = require("bible_ref.db")
-
--- Use a tiny in-memory stub by patching the internal index directly
--- (avoids needing the real JSON file for unit tests)
-do
-  -- Access the module's internals by calling set_path with a temp file
-  local tmp = os.tmpname() .. ".json"
-  local f = io.open(tmp, "w")
-  f:write(vim.json.encode({
-    ["James 1:1"]         = "James, a servant of God and of the Lord Jesus Christ.",
-    ["James 1:2"]         = "Count it all joy, my brothers, when you meet trials of various kinds,",
-    ["James 1:3"]         = "for you know that the testing of your faith produces steadfastness.",
-    ["1 Corinthians 4:2"] = "Moreover, it is required of stewards that they be found faithful.",
-    ["Genesis 1:1"]       = "In the beginning, God created the heavens and the earth.",
-  }))
-  f:close()
-  db.set_path(tmp)
-end
 
 ok("Single verse lookup: James 1:1",
   db.lookup("James", 1, 1):find("servant of God") ~= nil,
@@ -164,9 +217,59 @@ ok("Range lookup: James 1:1-3 returns 3 verses",
   db.lookup_range("James", 1, 1, 3):find("%[3%]") ~= nil,
   "got: " .. db.lookup_range("James", 1, 1, 3):sub(1, 80))
 
-ok("Missing verse returns fallback string (not error)",
-  db.lookup("Jude", 99, 99):find("not found") ~= nil,
+ok("Missing verse returns graceful 'not present' message (not error)",
+  db.lookup("Jude", 99, 99):find("not present in") ~= nil,
   "got: " .. db.lookup("Jude", 99, 99))
+
+-- ---------------------------------------------------------------------------
+-- Tests: Per-version lookups (db.lua)
+-- ---------------------------------------------------------------------------
+section("Per-Version Lookups")
+
+ok("TESTB James 1:1 found via explicit tag (distinct text)",
+  db.lookup("TESTB", "James", 1, 1):find("TESTB:") ~= nil,
+  "got: " .. db.lookup("TESTB", "James", 1, 1):sub(1, 60))
+
+ok("TESTB lookup by 1-based index",
+  db.lookup(2, "James", 1, 1):find("TESTB:") ~= nil,
+  "got: " .. db.lookup(2, "James", 1, 1):sub(1, 60))
+
+ok("TESTB absent book → graceful 'not present in TESTB'",
+  db.lookup("TESTB", "Genesis", 1, 1):find("not present in TESTB") ~= nil,
+  "got: " .. db.lookup("TESTB", "Genesis", 1, 1))
+
+ok("TESTB 1 Corinthians 4:2 present",
+  db.lookup("TESTB", "1 Corinthians", 4, 2):find("TESTB:") ~= nil,
+  "got: " .. db.lookup("TESTB", "1 Corinthians", 4, 2):sub(1, 60))
+
+ok("TESTB range James 1:1–3 via 5-arg signature",
+  db.lookup_range("TESTB", "James", 1, 1, 3):find("%[3%]") ~= nil,
+  "got: " .. db.lookup_range("TESTB", "James", 1, 1, 3):sub(1, 80))
+
+ok("all_entries('TESTB') excludes Genesis",
+  (function()
+    local es = db.all_entries("TESTB")
+    for _, e in ipairs(es) do
+      if e.ref.book == "Genesis" then return false end
+    end
+    return #es == 4
+  end)(),
+  "expected 4 TESTB entries, no Genesis")
+
+ok("all_entries('ESV') has 5 entries in canonical order",
+  (function()
+    local es = db.all_entries("ESV")
+    if #es ~= 5 then return false end
+    return es[1].ref.book == "Genesis" and es[#es].ref.book == "James"
+  end)(),
+  "expected Genesis first, James last")
+
+-- Lazy-load check: TESTB must not be loaded until first queried
+local db_loaded_testb = db.is_loaded("TESTB")
+ok("TESTB marked loaded after queries", db_loaded_testb == true)
+
+-- Cleanup temp dir
+vim.fn.delete(data_dir, "rf")
 
 -- ---------------------------------------------------------------------------
 -- Summary

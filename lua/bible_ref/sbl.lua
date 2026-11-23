@@ -88,6 +88,40 @@ M.abbrev = {
   ["revelation"]       = "Rev",
 }
 
+-- ---------------------------------------------------------------------------
+-- Canonical book order (Genesis → Revelation). Used to sort dataset entries.
+-- ---------------------------------------------------------------------------
+M.book_list = {
+  -- Pentateuch
+  "Genesis", "Exodus", "Leviticus", "Numbers", "Deuteronomy",
+  -- Historical
+  "Joshua", "Judges", "Ruth", "1 Samuel", "2 Samuel",
+  "1 Kings", "2 Kings", "1 Chronicles", "2 Chronicles",
+  "Ezra", "Nehemiah", "Esther",
+  -- Wisdom / Poetry
+  "Job", "Psalms", "Proverbs", "Ecclesiastes", "Song of Solomon",
+  -- Major Prophets
+  "Isaiah", "Jeremiah", "Lamentations", "Ezekiel", "Daniel",
+  -- Minor Prophets
+  "Hosea", "Joel", "Amos", "Obadiah", "Jonah", "Micah",
+  "Nahum", "Habakkuk", "Zephaniah", "Haggai", "Zechariah", "Malachi",
+  -- Gospels / Acts
+  "Matthew", "Mark", "Luke", "John", "Acts",
+  -- Pauline Epistles
+  "Romans", "1 Corinthians", "2 Corinthians", "Galatians", "Ephesians",
+  "Philippians", "Colossians", "1 Thessalonians", "2 Thessalonians",
+  "1 Timothy", "2 Timothy", "Titus", "Philemon",
+  -- General Epistles / Revelation
+  "Hebrews", "James", "1 Peter", "2 Peter",
+  "1 John", "2 John", "3 John", "Jude", "Revelation",
+}
+
+--- book_order["<lowercase full name>"] → 1-based position in the canon.
+M.book_order = {}
+for i, name in ipairs(M.book_list) do
+  M.book_order[name:lower()] = i
+end
+
 --- Resolve a full or partial book name to its SBL abbreviation.
 --- Returns nil if not found.
 ---@param name string

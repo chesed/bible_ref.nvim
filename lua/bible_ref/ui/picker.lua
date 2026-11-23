@@ -1,8 +1,12 @@
 --- lua/bible_ref/ui/picker.lua
 --- Fuzzy verse picker with fzf-lua primary, vim.ui.select fallback.
 ---
---- On <CR>: inserts SBL-formatted reference at saved cursor position.
---- On <C-l> / <C-o>: opens highlighted verse on logos.com.
+--- On <CR>:       inserts SBL-formatted reference at the saved cursor position
+---                (appends the version tag when opts.picker.append_version = true
+---                 and the active version is not the primary/default dataset)
+--- On <C-l>/<C-o>: opens the highlighted verse on logos.com
+--- On <C-v>:      (fzf-lua) cycles to the next dataset version and reopens the
+---                picker with that version's entries
 
 local M = {}
 
@@ -15,79 +19,134 @@ local logos = require("bible_ref.logos")
 -- ---------------------------------------------------------------------------
 
 --- Insert text at a saved {win, row, col} position.
----@param target_win  number  window id
----@param target_buf  number  buffer id
----@param row         number  1-indexed row
----@param col         number  0-indexed byte col
----@param text        string
-local function insert_at(target_win, target_buf, row, col, text)
+local function insert_at(target, text)
+  local target_win, target_buf = target.win, target.buf
   if not vim.api.nvim_win_is_valid(target_win) then
     vim.notify("[bible_ref] Target window no longer valid", vim.log.levels.WARN)
     return
   end
+  local row, col = target.row, target.col
   vim.api.nvim_set_current_win(target_win)
   local line = vim.api.nvim_buf_get_lines(target_buf, row - 1, row, false)[1] or ""
   local new_line = line:sub(1, col) .. text .. line:sub(col + 1)
   vim.api.nvim_buf_set_lines(target_buf, row - 1, row, false, { new_line })
-  -- Move cursor to end of inserted text
   vim.api.nvim_win_set_cursor(target_win, { row, col + #text })
 end
 
---- Build the action callback: format entry and insert it.
----@param entry      table   {ref = {book,chapter,verse_start}, label = string}
----@param target_win number
----@param target_buf number
----@param row        number  1-indexed
----@param col        number  0-indexed byte col
-local function accept_entry(entry, target_win, target_buf, row, col)
+--- True when the user opted into appending the version tag on insert.
+--- The merged user options, or nil before setup().
+local function user_opts()
+  local ok, api = pcall(require, "bible_ref")
+  if ok and type(api.opts) == "function" then
+    local ok2, o = pcall(api.opts)
+    if ok2 and type(o) == "table" then return o end
+  end
+  return nil
+end
+
+--- True when the user opted into appending the version tag on insert.
+local function append_version_enabled()
+  local o = user_opts()
+  if o and type(o.picker) == "table" then
+    return o.picker.append_version == true
+  end
+  return false
+end
+
+--- Build the text to insert for an entry (SBL ref, optional version tag).
+local function insert_text_for(entry)
   local ref_str = sbl.format(entry.ref)
-  insert_at(target_win, target_buf, row, col, ref_str)
+  local cfg     = require("bible_ref.config")
+  local versions = cfg.get_versions()
+  local v        = cfg.get_current_version()
+  local default  = versions[1]
+  if v and default and v.tag ~= default.tag and append_version_enabled() then
+    ref_str = ref_str .. " " .. v.tag
+  end
+  return ref_str
+end
+
+--- Accept the entry: insert at the saved target position.
+local function accept_entry(entry, target)
+  insert_at(target, insert_text_for(entry))
+end
+
+--- Resolve the picker backend from user config ("auto" | "fzf-lua" | "select").
+local function choose_backend()
+  local be = "auto"
+  local o = user_opts()
+  if o and type(o.picker) == "table" and type(o.picker.backend) == "string" then
+    be = o.picker.backend
+  end
+  local has_fzf = pcall(require, "fzf-lua")
+  if be == "auto" then
+    return has_fzf and "fzf-lua" or "select"
+  end
+  if be == "fzf-lua" then
+    if has_fzf then return "fzf-lua" end
+    vim.notify("[bible_ref] fzf-lua not available; falling back to vim.ui.select",
+      vim.log.levels.WARN)
+    return "select"
+  end
+  return "select"
 end
 
 -- ---------------------------------------------------------------------------
 -- fzf-lua picker
 -- ---------------------------------------------------------------------------
-local function open_fzf(entries, target_win, target_buf, row, col)
+
+local function open_fzf(target, version)
+  local cfg = require("bible_ref.config")
   local fzf = require("fzf-lua")
 
-  -- Build display items: label string → entry mapping
-  local labels = {}
+  local entries = db.all_entries(version.tag)
+  if #entries == 0 then
+    vim.notify("[bible_ref] No verses in dataset '" .. version.tag
+      .. "'. Check your data directory.", vim.log.levels.WARN)
+    return
+  end
+
+  local labels   = {}
   local by_label = {}
   for _, e in ipairs(entries) do
-    table.insert(labels, e.label)
-    by_label[e.label] = e
+    labels[#labels + 1] = e.label
+    by_label[e.label]   = e
   end
 
   fzf.fzf_exec(labels, {
-    prompt  = "Bible  ",
+    prompt    = string.format("Bible [%s] > ", version.tag),
     previewer = false,
-    actions = {
+    actions   = {
       -- <CR>: insert SBL reference
       ["default"] = function(selected)
-        if selected and selected[1] then
-          local entry = by_label[selected[1]]
-          if entry then
-            accept_entry(entry, target_win, target_buf, row, col)
-          end
+        if selected and selected[1] and by_label[selected[1]] then
+          accept_entry(by_label[selected[1]], target)
         end
       end,
-      -- <C-l>: open in Logos
+      -- <C-l> / <C-o>: open in Logos
       ["ctrl-l"] = function(selected)
-        if selected and selected[1] then
-          local entry = by_label[selected[1]]
-          if entry then
-            logos.open(sbl.format(entry.ref))
-          end
+        if selected and selected[1] and by_label[selected[1]] then
+          logos.open(sbl.format(by_label[selected[1]].ref))
         end
       end,
-      -- <C-o>: also open in Logos (alternate binding)
       ["ctrl-o"] = function(selected)
-        if selected and selected[1] then
-          local entry = by_label[selected[1]]
-          if entry then
-            logos.open(sbl.format(entry.ref))
-          end
+        if selected and selected[1] and by_label[selected[1]] then
+          logos.open(sbl.format(by_label[selected[1]].ref))
         end
+      end,
+      -- <C-v>: cycle version and reopen the picker on the new dataset
+      ["ctrl-v"] = function()
+        local versions = cfg.get_versions()
+        if #versions < 2 then
+          vim.notify("[bible_ref] Only one dataset is available", vim.log.levels.INFO)
+          return
+        end
+        local nidx = cfg.next_version_index(cfg.get_current_version_index())
+        cfg.set_current_version_index(nidx)
+        local nv = cfg.get_version(nidx)
+        vim.notify(string.format("[bible_ref] Bible dataset: %s", nv.tag),
+          vim.log.levels.INFO)
+        open_fzf(target, nv)
       end,
     },
   })
@@ -96,55 +155,61 @@ end
 -- ---------------------------------------------------------------------------
 -- vim.ui.select fallback
 -- ---------------------------------------------------------------------------
-local function open_select(entries, target_win, target_buf, row, col)
-  local labels = {}
+
+local function open_select(target, version)
+  local entries = db.all_entries(version.tag)
+  if #entries == 0 then
+    vim.notify("[bible_ref] No verses in dataset '" .. version.tag
+      .. "'. Check your data directory.", vim.log.levels.WARN)
+    return
+  end
+
+  local labels   = {}
   local by_label = {}
   for _, e in ipairs(entries) do
-    table.insert(labels, e.label)
-    by_label[e.label] = e
+    labels[#labels + 1] = e.label
+    by_label[e.label]   = e
   end
 
   vim.ui.select(labels, {
-    prompt = "Bible verse: ",
+    prompt      = string.format("Bible [%s] verse: ", version.tag),
     format_item = function(item) return item end,
   }, function(choice)
-    if choice then
-      local entry = by_label[choice]
-      if entry then
-        accept_entry(entry, target_win, target_buf, row, col)
-      end
+    if choice and by_label[choice] then
+      accept_entry(by_label[choice], target)
     end
   end)
 end
 
 -- ---------------------------------------------------------------------------
--- Public: open picker
+-- Public API
 -- ---------------------------------------------------------------------------
 
---- Open the Bible verse picker.
---- Saves current window/buffer/cursor before opening so text can be inserted
---- at the right place after the picker closes.
+--- Open the Bible verse picker on the currently active dataset version.
 function M.open()
-  -- Capture target context BEFORE opening picker
-  local target_win = vim.api.nvim_get_current_win()
-  local target_buf = vim.api.nvim_get_current_buf()
-  local cursor     = vim.api.nvim_win_get_cursor(target_win)
-  local row        = cursor[1]      -- 1-indexed
-  local col        = cursor[2]      -- 0-indexed byte col
-
-  -- Load dataset entries (lazy; first call may take a moment)
-  local entries = db.all_entries()
-  if #entries == 0 then
-    vim.notify("[bible_ref] No verses loaded. Check your json_path setting.", vim.log.levels.WARN)
+  local cfg = require("bible_ref.config")
+  local versions = cfg.get_versions()
+  if #versions == 0 then
+    vim.notify("[bible_ref] No Bible datasets found. Check your data directory.",
+      vim.log.levels.WARN)
     return
   end
+  local version = cfg.get_current_version()
 
-  -- Choose picker backend
-  local has_fzf = pcall(require, "fzf-lua")
-  if has_fzf then
-    open_fzf(entries, target_win, target_buf, row, col)
+  -- Capture target context BEFORE opening the picker so text can be inserted
+  -- at the right place after it closes.
+  local target = {
+    win = vim.api.nvim_get_current_win(),
+    buf = vim.api.nvim_get_current_buf(),
+  }
+  local cursor = vim.api.nvim_win_get_cursor(target.win)
+  target.row = cursor[1] -- 1-indexed
+  target.col = cursor[2] -- 0-indexed byte col
+
+  if choose_backend() == "fzf-lua" then
+    open_fzf(target, version)
   else
-    open_select(entries, target_win, target_buf, row, col)
+    open_select(target, version)
   end
 end
 

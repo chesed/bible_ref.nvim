@@ -1,209 +1,246 @@
 --- lua/bible_ref/db.lua
---- JSON Bible loader, lazy indexer, verse lookup, and range assembly.
---- Supports multiple datasets (versions) simultaneously.
+--- JSON Bible loader, lazy per-version indexer, verse lookup, and range assembly.
+---
+--- Every dataset is keyed by its version tag (e.g. "ESV", "KJV", "SBLGNT").
+--- Datasets are read and indexed only the first time a tag is queried —
+--- never at plugin load, never all-at-once.
 
 local M = {}
 
--- Internal state (populated lazily on first use per version)
-local _index      = {} -- { [version_index] = { ["Book|ch|v"] = "verse text", ... } }
-local _loaded     = {} -- { [version_index] = true }
-local _json_paths = {} -- set by init.lua via M.set_paths() or M.set_path()
+-- Internal state (populated lazily, per version tag)
+local _indices = {} -- { [tag] = { ["Book|ch|v"] = "verse text", ... } }
+local _loaded  = {} -- { [tag] = true }
+local _paths   = {} -- { [tag] = "/abs/path/to/bible_<tag>.json" }
+
+local function config()
+  return require("bible_ref.config")
+end
 
 -- ---------------------------------------------------------------------------
--- Set the JSON dataset paths for all versions.
---- @param paths table  { [version_index] = path, ... }
---- Example: M.set_paths({ [1] = "data/bible.json", [2] = "data/bible_kjv.json" })
+-- Path registration
+-- ---------------------------------------------------------------------------
+
+--- Register dataset paths keyed by version tag. Resets any cached indices.
+---@param paths table { [tag] = "/abs/path.json", ... }
 function M.set_paths(paths)
-  _json_paths = paths or {}
-  _index      = {}
-  _loaded     = {}
+  _paths = {}
+  for tag, path in pairs(paths or {}) do
+    _paths[tag] = path
+  end
+  _indices = {}
+  _loaded  = {}
 end
 
---- Set the JSON dataset path for the primary version (backward-compatible).
---- @param path string
+--- Set the dataset path for the currently active version (v1 backward-compat).
+---@param path string
 function M.set_path(path)
-  M.set_paths({ [1] = path })
+  local v = config().get_current_version()
+  M.set_paths({ [v and v.tag or "DEFAULT"] = path })
 end
 
 -- ---------------------------------------------------------------------------
--- Read and parse the JSON file.  Dies loudly if the file is missing.
---- @param path string
---- @return table  raw decoded Lua value
-local function read_json(path)
-  if not path then
-    error("[bible_ref] No JSON dataset path configured.")
-  end
-  local f, err = io.open(path, "r")
-  if not f then
-    error("[bible_ref] Cannot open Bible dataset: " .. tostring(err))
-  end
-  local raw = f:read("*a")
-  f:close()
-  -- vim.json.decode is available in Neovim 0.6+
-  local ok, decoded = pcall(vim.json.decode, raw)
-  if not ok then
-    error("[bible_ref] Failed to parse Bible JSON: " .. tostring(decoded))
-  end
-  return decoded
-end
-
+-- JSON reading & indexing
 -- ---------------------------------------------------------------------------
--- Build the internal lookup index from decoded JSON.
---- @param version_index number
---- @param decoded any   raw decoded Lua value
-local function build_index(version_index, decoded)
-  _index[version_index] = {}
 
-  if type(decoded) == "table" then
-    -- Detect schema
-    if vim.islist and (vim.islist(decoded) or (#decoded > 0 and decoded[1] ~= nil)) then
-      -- Array-of-objects schema: [{book, chapter, verse, text}, ...]
-      for _, entry in ipairs(decoded) do
-        if entry.book and entry.chapter and entry.verse and entry.text then
-          local key = string.format("%s|%d|%d", entry.book, tonumber(entry.chapter), tonumber(entry.verse))
-          _index[version_index][key] = entry.text
-        end
+--- Build the internal lookup index from decoded JSON.
+--- Supports both schemas:
+---   1. Flat map:          { "Genesis 1:1": "text", ... }
+---   2. Array of objects:  [ { book, chapter, verse, text }, ... ]
+---@param idx table target index table (to be filled)
+---@param decoded any raw decoded Lua value
+local function build_index(idx, decoded)
+  if type(decoded) ~= "table" then return end
+
+  if vim.islist and (vim.islist(decoded) or (#decoded > 0 and decoded[1] ~= nil)) then
+    -- Array-of-objects schema
+    for _, entry in ipairs(decoded) do
+      if entry.book and entry.chapter and entry.verse and entry.text then
+        local key = string.format("%s|%d|%d", entry.book, tonumber(entry.chapter), tonumber(entry.verse))
+        idx[key] = entry.text
       end
-    else
-      -- Flat map schema: { "Genesis 1:1": "text", ... }
-      for ref_str, text in pairs(decoded) do
-        local book, ch, v = ref_str:match("^(.-)%s+(%d+):(%d+)$")
-        if book and ch and v then
-          local key = string.format("%s|%d|%d", book, tonumber(ch), tonumber(v))
-          _index[version_index][key] = text
-        end
+    end
+  else
+    -- Flat map schema
+    for ref_str, text in pairs(decoded) do
+      local book, ch, v = ref_str:match("^(.-)%s+(%d+):(%d+)$")
+      if book and ch and v then
+        local key = string.format("%s|%d|%d", book, tonumber(ch), tonumber(v))
+        idx[key] = text
       end
     end
   end
 end
 
--- ---------------------------------------------------------------------------
--- Lazy-load: only called once per version.
---- @param version_index number|nil
-local function ensure_loaded(version_index)
-  version_index = version_index or 1
-  if _loaded[version_index] then return end
-  local ok, err = pcall(function()
-    local path = _json_paths[version_index]
-    local decoded = read_json(path)
-    build_index(version_index, decoded)
-  end)
-  _loaded[version_index] = true -- mark loaded even on error so we don't retry every call
-  if not ok then
-    vim.notify("[bible_ref] " .. tostring(err), vim.log.levels.ERROR)
+--- Read, parse, and index one dataset. Safe to call repeatedly; loads once.
+--- Missing files or parse failures produce a notification and an empty index,
+--- never a runtime error.
+---@param tag string
+local function load_version(tag)
+  if _loaded[tag] then return end
+
+  local idx = {}
+  local path = _paths[tag] or config().version_path(tag)
+  if path and vim.fn.filereadable(path) == 1 then
+    local ok, err = pcall(function()
+      local f = io.open(path, "r")
+      if not f then error("cannot open " .. tostring(path)) end
+      local raw = f:read("*a")
+      f:close()
+      local decoded = vim.json.decode(raw)
+      build_index(idx, decoded)
+    end)
+    if not ok then
+      vim.notify("[bible_ref] Failed to load dataset '" .. tag
+        .. "': " .. tostring(err), vim.log.levels.ERROR)
+    end
+  elseif path then
+    vim.notify("[bible_ref] Dataset for '" .. tag .. "' not found: " .. path,
+      vim.log.levels.WARN)
   end
+
+  _indices[tag] = idx
+  _loaded[tag]  = true
+end
+
+--- Resolve a version argument (tag string, 1-based index, or nil = current)
+--- to a version tag.
+---@param arg string|number|nil
+---@return string tag
+local function resolve_tag(arg)
+  local cfg = config()
+  if arg == nil then
+    local v = cfg.get_current_version()
+    return v and v.tag or "DEFAULT"
+  end
+  if type(arg) == "number" then
+    local v = cfg.get_version(arg)
+    return v and v.tag or tostring(arg)
+  end
+  local v = cfg.get_version(arg)
+  if v then return v.tag end
+  return tostring(arg):upper()
 end
 
 -- ---------------------------------------------------------------------------
--- Lookup a single verse. Returns the verse text or a fallback string.
---- Accepts either:
----   M.lookup(book, chapter, verse)
----   M.lookup(version_index, book, chapter, verse)
---- @param arg1 number|string  version_index (number) or book (string)
---- @param arg2 string|number  book (string) or chapter (number)
---- @param arg3 number         chapter (number) or verse (number)
---- @param arg4 number|nil     verse (number, when version_index is passed)
---- @return string
+-- Lookup API
+-- ---------------------------------------------------------------------------
+
+--- Lookup a single verse.
+---
+--- Dual signature:
+---   M.lookup(book, chapter, verse)                          -- active version
+---   M.lookup(version_tag_or_idx, book, chapter, verse)      -- explicit version
+---
+---@param arg1 string|number  book (3-arg form) or version tag/index (4-arg form)
+---@param arg2 string|number  chapter (3-arg) or book (4-arg)
+---@param arg3 number         verse (3-arg) or chapter (4-arg)
+---@param arg4 number|nil     verse (4-arg form only)
+---@return string verse text, or a graceful "not present" message
 function M.lookup(arg1, arg2, arg3, arg4)
-  local version_index, book, chapter, verse
-  if type(arg1) == "string" then
-    version_index = 1
-    book = arg1
-    chapter = arg2
-    verse = arg3
+  local tag, book, chapter, verse
+  if arg4 ~= nil then
+    tag, book, chapter, verse = resolve_tag(arg1), arg2, arg3, arg4
   else
-    version_index = arg1 or 1
-    book = arg2
-    chapter = arg3
-    verse = arg4
+    tag, book, chapter, verse = resolve_tag(nil), arg1, arg2, arg3
   end
 
-  ensure_loaded(version_index)
-  if not _index then return "[bible_ref: dataset not loaded]" end
-  local key = string.format("%s|%d|%d", book, tonumber(chapter) or 0, tonumber(verse) or 0)
-  return (_index[version_index] or {})[key] or string.format("[%s %s:%s — not found in dataset]", tostring(book), tostring(chapter), tostring(verse))
+  load_version(tag)
+  local ch = tonumber(chapter) or 0
+  local v  = tonumber(verse) or 0
+  local key = string.format("%s|%d|%d", tostring(book), ch, v)
+
+  local text = _indices[tag] and _indices[tag][key]
+  if text then return text end
+  return string.format("[%s %d:%d — not present in %s]", tostring(book), ch, v, tag)
 end
 
--- ---------------------------------------------------------------------------
 --- Lookup a verse range. Concatenates verses with a space separator.
---- Accepts either:
----   M.lookup_range(book, chapter, verse_start, verse_end)
----   M.lookup_range(version_index, book, chapter, verse_start, verse_end)
---- @param arg1 number|string  version_index (number) or book (string)
---- @param arg2 string|number  book (string) or chapter (number)
---- @param arg3 number         chapter (number) or verse_start (number)
---- @param arg4 number         verse_start (number) or verse_end (number)
---- @param arg5 number|nil     verse_end (number, when version_index is passed)
---- @return string
+---
+--- Dual signature:
+---   M.lookup_range(book, chapter, v_start, v_end)                   -- active version
+---   M.lookup_range(version_tag_or_idx, book, chapter, v_start, v_end)
+---
+---@param arg1 string|number  book (4-arg) or version tag/index (5-arg)
+---@param arg2 string|number  chapter (4-arg) or book (5-arg)
+---@param arg3 number         v_start (4-arg) or chapter (5-arg)
+---@param arg4 number         v_end (4-arg) or v_start (5-arg)
+---@param arg5 number|nil     v_end (5-arg form only)
+---@return string
 function M.lookup_range(arg1, arg2, arg3, arg4, arg5)
-  local version_index, book, chapter, verse_start, verse_end
-  if type(arg1) == "string" then
-    version_index = 1
-    book = arg1
-    chapter = arg2
-    verse_start = arg3
-    verse_end = arg4
+  local tag, book, chapter, v_start, v_end
+  if arg5 ~= nil then
+    tag, book, chapter, v_start, v_end = resolve_tag(arg1), arg2, arg3, arg4, arg5
   else
-    version_index = arg1 or 1
-    book = arg2
-    chapter = arg3
-    verse_start = arg4
-    verse_end = arg5
+    tag, book, chapter, v_start, v_end = resolve_tag(nil), arg1, arg2, arg3, arg4
   end
 
-  ensure_loaded(version_index)
-  if not _index then return "[bible_ref: dataset not loaded]" end
+  load_version(tag)
+  local idx = _indices[tag] or {}
+  local ch  = tonumber(chapter) or 0
+  local vs  = tonumber(v_start) or 0
+  local ve  = tonumber(v_end) or vs
+  if ve < vs then vs, ve = ve, vs end
 
-  local parts = {}
-  local v_start = tonumber(verse_start) or 0
-  local v_end   = tonumber(verse_end) or 0
-  for v = v_start, v_end do
-    local key  = string.format("%s|%d|%d", book, tonumber(chapter) or 0, v)
-    local text = (_index[version_index] or {})[key]
+  local parts   = {}
+  local missing = 0
+  for v = vs, ve do
+    local text = idx[string.format("%s|%d|%d", tostring(book), ch, v)]
     if text then
-      table.insert(parts, string.format("[%d] %s", v, text))
+      parts[#parts + 1] = string.format("[%d] %s", v, text)
     else
-      table.insert(parts, string.format("[%d] (verse not found)", v))
+      parts[#parts + 1] = string.format("[%d] (verse not found)", v)
+      missing = missing + 1
     end
   end
 
-  if #parts == 0 then
-    return string.format("[%s %s:%s–%s — not found in dataset]", tostring(book), tostring(chapter), tostring(verse_start), tostring(verse_end))
+  if missing == (ve - vs + 1) then
+    -- Entire range absent (e.g. an OT reference against the NT-only SBLGNT)
+    return string.format("[%s %d:%d–%d — not present in %s]", tostring(book), ch, vs, ve, tag)
   end
   return table.concat(parts, " ")
 end
 
--- ---------------------------------------------------------------------------
---- Return all indexed verse keys in sorted order.
---- @param version_index number|nil
---- @return string[]  entries formatted "SBL_ref — verse text" for display
-function M.all_entries(version_index)
-  version_index = version_index or 1
-  ensure_loaded(version_index)
-  if not _index or not _index[version_index] then return {} end
+--- Return all entries for a version, sorted in canonical book order.
+---@param version_tag_or_idx string|number|nil
+---@return table[] { key, label, ref = {book,chapter,verse_start}, text }
+function M.all_entries(version_tag_or_idx)
+  local tag = resolve_tag(version_tag_or_idx)
+  load_version(tag)
+  local idx = _indices[tag] or {}
 
-  local sbl = require("bible_ref.sbl")
+  local sbl   = require("bible_ref.sbl")
+  local order = sbl.book_order or {}
+
   local results = {}
-  for key, text in pairs(_index[version_index]) do
+  for key, text in pairs(idx) do
     local book, ch, v = key:match("^(.-)|(%d+)|(%d+)$")
     if book then
       local ref = { book = book, chapter = tonumber(ch), verse_start = tonumber(v) }
-      local label = sbl.format(ref) .. " — " .. text:sub(1, 80)
-      table.insert(results, { key = key, label = label, ref = ref, text = text })
+      results[#results + 1] = {
+        key   = key,
+        ref   = ref,
+        text  = text,
+        label = sbl.format(ref) .. " — " .. text:sub(1, 80),
+      }
     end
   end
 
-  -- Sort by book order, then chapter, then verse
-  table.sort(results, function(a, b) return a.key < b.key end)
+  table.sort(results, function(a, b)
+    local oa = order[a.ref.book:lower()] or 999
+    local ob = order[b.ref.book:lower()] or 999
+    if oa ~= ob then return oa < ob end
+    if a.ref.chapter ~= b.ref.chapter then return a.ref.chapter < b.ref.chapter end
+    return a.ref.verse_start < b.ref.verse_start
+  end)
   return results
 end
 
--- ---------------------------------------------------------------------------
---- Return true if the dataset has been loaded.
---- @param version_index number|nil
-function M.is_loaded(version_index)
-  version_index = version_index or 1
-  return (_loaded[version_index] == true) and (_index[version_index] ~= nil)
+--- Return true if the dataset for a version has been loaded.
+---@param version_tag_or_idx string|number|nil
+---@return boolean
+function M.is_loaded(version_tag_or_idx)
+  local tag = resolve_tag(version_tag_or_idx)
+  return _loaded[tag] == true
 end
 
 return M

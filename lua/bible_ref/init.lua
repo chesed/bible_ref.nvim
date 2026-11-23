@@ -7,12 +7,31 @@ local M = {}
 -- Defaults
 -- ---------------------------------------------------------------------------
 local DEFAULTS = {
-  --- Absolute path to the JSON Bible dataset.
-  --- Defaults to <plugin_root>/data/bible.json (auto-detected).
+  --- Absolute path to a single JSON Bible dataset (v1 backward-compat).
+  --- When set, the version registry collapses to just this one dataset.
   json_path = nil,
 
-  --- Preferred picker backend: "fzf-lua" | "telescope" | "select" | "auto"
-  picker = "auto",
+  --- Directory to scan for datasets (default <plugin_root>/data).
+  data_dir = nil,
+
+  --- Explicit version list, overriding directory discovery:
+  ---   versions = {
+  ---     { tag = "ESV",  path = "/abs/path/esv.json",  label = "ESV" },
+  ---     { tag = "KJV",  path = "/abs/path/kjv.json",  label = "KJV" },
+  ---   }
+  versions = nil,
+
+  --- Starting active version: tag/name (string) or 1-based index (number).
+  default_version = nil,
+
+  --- Picker options:
+  ---   backend        "auto" | "fzf-lua" | "select"
+  ---   append_version append the version tag to inserted refs when the active
+  ---                  version is not the primary dataset (e.g. "Jas 3:1 KJV")
+  picker = {
+    backend        = "auto",
+    append_version = false,
+  },
 
   --- Keymaps to register globally (set to false to disable auto-keymaps)
   keymaps = {
@@ -34,19 +53,16 @@ local config = {}  -- merged options stored after setup()
 --- Resolve plugin root directory (the parent of the lua/ folder).
 ---@return string
 local function plugin_root()
-  -- __FILE__ → .../lua/bible_ref/init.lua
+  -- init.lua → bible_ref/ → lua/ → plugin_root/
   local src = debug.getinfo(1, "S").source:sub(2) -- strip leading "@"
-  -- Navigate up: init.lua → bible_ref/ → lua/ → plugin_root/
   return vim.fn.fnamemodify(src, ":h:h:h")
 end
 
---- Register the three user commands.
+--- Register the user commands.
 local function register_commands()
-  -- :BibleHover — inspect reference under cursor
+  -- :BibleHover — inspect reference under cursor (active dataset version)
   vim.api.nvim_create_user_command("BibleHover", function()
     local parse = require("bible_ref.parse")
-    local db    = require("bible_ref.db")
-    local sbl   = require("bible_ref.sbl")
     local float = require("bible_ref.ui.float")
 
     local ref = parse.ref_at_cursor()
@@ -55,21 +71,45 @@ local function register_commands()
       return
     end
 
-    local verse_text
-    if ref.verse_end then
-      verse_text = db.lookup_range(ref.book, ref.chapter, ref.verse_start, ref.verse_end)
-    else
-      verse_text = db.lookup(ref.book, ref.chapter, ref.verse_start)
-    end
-
-    local ref_str = sbl.format(ref)
-    float.show(ref_str, verse_text)
+    -- Structured ref; the float window handles version cycling internally.
+    float.show(ref)
   end, { desc = "bible_ref: Show verse preview for reference under cursor" })
 
   -- :BiblePick — fuzzy picker
   vim.api.nvim_create_user_command("BiblePick", function()
     require("bible_ref.ui.picker").open()
   end, { desc = "bible_ref: Fuzzy-search Bible verses and insert SBL reference" })
+
+  -- :BibleVersion [tag] — show active dataset, or set it
+  vim.api.nvim_create_user_command("BibleVersion", function(args)
+    local cfg = require("bible_ref.config")
+    local versions = cfg.get_versions()
+
+    if not args or not args.args or #vim.trim(args.args) == 0 then
+      local cur = cfg.get_current_version()
+      local idx = cfg.get_current_version_index()
+      local lines = {
+        string.format("bible_ref: active dataset → %s (%s)",
+          cur and cur.tag or "?", cur and cur.label or "?"),
+      }
+      for i, v in ipairs(versions) do
+        lines[#lines + 1] = string.format("  %s%d. %s — %s",
+          (i == idx and "*" or " "), i, v.tag, v.label)
+      end
+      vim.notify(table.concat(lines, "\n"), vim.log.levels.INFO)
+    else
+      local tag = vim.trim(args.args)
+      if cfg.set_version(tag) then
+        vim.notify("[bible_ref] Active dataset: "
+          .. tostring(cfg.get_current_version().tag), vim.log.levels.INFO)
+      else
+        local known = {}
+        for _, v in ipairs(versions) do known[#known + 1] = v.tag end
+        vim.notify("[bible_ref] Unknown dataset " .. tag
+          .. ". Available: " .. table.concat(known, ", "), vim.log.levels.WARN)
+      end
+    end
+  end, { desc = "bible_ref: Show or set the active Bible dataset", nargs = "?" })
 
   -- :BibleOpenLogos — open cursor reference in logos.com
   vim.api.nvim_create_user_command("BibleOpenLogos", function()
@@ -115,26 +155,87 @@ end
 
 --- Setup bible_ref.nvim.
 ---
---- Example:
+--- Example (auto-discovery of <plugin_root>/data):
 ---   require("bible_ref").setup({
----     json_path = vim.fn.stdpath("data") .. "/bible_ref/esv.json",
----     keymaps   = { hover = "<leader>bh", pick = "<leader>bp" },
+---     keymaps = { hover = "<leader>bh", pick = "<leader>bp" },
+---   })
+---
+--- Example (explicit datasets):
+---   require("bible_ref").setup({
+---     versions = {
+---       { tag = "ESV",  path = "/data/esv.json" },
+---       { tag = "KJV",  path = "/data/kjv.json" },
+---     },
+---     default_version = "KJV",
+---     picker = { backend = "fzf-lua", append_version = true },
 ---   })
 ---
 ---@param opts table|nil
 function M.setup(opts)
   config = vim.tbl_deep_extend("force", DEFAULTS, opts or {})
 
-  -- Resolve json_path: default to <plugin_root>/data/bible.json
-  if not config.json_path then
-    config.json_path = plugin_root() .. "/data/bible.json"
+  -- Build the config-module options.
+  local cfg_opts = {}
+  if config.data_dir then
+    cfg_opts.data_dir = config.data_dir
+  end
+  if config.default_version then
+    cfg_opts.default_version = config.default_version
   end
 
-  -- Tell db.lua where the dataset lives
-  require("bible_ref.db").set_path(config.json_path)
+  -- v1 backward-compat: a single json_path collapses the registry.
+  if config.json_path then
+    cfg_opts.versions = {
+      { tag = "ESV", file = vim.fn.fnamemodify(config.json_path, ":t"),
+        path = config.json_path, label = "ESV", aliases = { "DEFAULT" } },
+    }
+  elseif config.versions and #config.versions > 0 then
+    cfg_opts.versions = config.versions
+  end
+
+  local versions = require("bible_ref.config").setup(cfg_opts)
+
+  -- Register dataset paths with the db layer (only entries that have paths).
+  local paths = {}
+  for _, v in ipairs(versions) do
+    if v.path then paths[v.tag] = v.path end
+  end
+  require("bible_ref.db").set_paths(paths)
 
   register_commands()
   register_keymaps()
+end
+
+--- Set the active dataset by tag/name. Returns true on success.
+---@param tag string  e.g. "ESV", "KJV", "SBLGNT"
+---@return boolean
+function M.set_version(tag)
+  return require("bible_ref.config").set_version(tag)
+end
+
+--- Retrieve a version entry by tag/name (string) or 1-based index (number).
+---@param tag_or_idx string|number
+---@return table|nil
+function M.get_version(tag_or_idx)
+  return require("bible_ref.config").get_version(tag_or_idx)
+end
+
+--- All registered versions, in order.
+---@return table[]
+function M.get_versions()
+  return require("bible_ref.config").get_versions()
+end
+
+--- The currently active version entry.
+---@return table|nil
+function M.get_current_version()
+  return require("bible_ref.config").get_current_version()
+end
+
+--- Merged user options (set after setup(); nil before).
+---@return table|nil
+function M.opts()
+  return config
 end
 
 --- Direct access to sub-modules for advanced use.
