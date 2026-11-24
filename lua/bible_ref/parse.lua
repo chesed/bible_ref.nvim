@@ -392,7 +392,11 @@ end
 -- ---------------------------------------------------------------------------
 
 --- Extract the reference under the cursor in the current buffer.
---- Returns a parsed reference table or nil.
+---
+--- A line may carry several citations. Every candidate that parses is kept
+--- together with its span in line coordinates; the span containing the
+--- cursor byte wins. If no span contains the cursor (cursor on a trailing
+--- parenthesis, between two citations, …) the nearest citation is returned.
 ---@return table|nil
 function M.ref_at_cursor()
   local line = vim.api.nvim_get_current_line()
@@ -401,27 +405,63 @@ function M.ref_at_cursor()
   if #line == 0 then return nil end
 
   -- Expand a window around the cursor position to capture the full ref.
-  -- We scan backward to find a reasonable start (up to 40 chars) and
-  -- forward for the end (up to 20 chars), then try substrings.
+  -- We scan backward to find a reasonable start (up to 40 bytes) and
+  -- forward for the end (up to 20 bytes), then try substrings.
   local win_start = math.max(1, col - 40 + 1)  -- 1-indexed
   local win_end   = math.min(#line, col + 20 + 1)
   local region    = line:sub(win_start, win_end)
 
-  -- Try progressively shorter/shifted substrings from the region.
-  -- We try starting at every byte position from win_start back to 0,
-  -- looking for the longest match that includes our cursor byte (col).
+  -- Cursor position in 1-based line byte coordinates.
+  local cursor = col + 1
+
+  -- Best candidate found so far: { ref = table, dist = number }.
+  -- dist 0 ⇒ the cursor byte falls inside the token's span;
+  -- dist > 0 ⇒ distance to the nearest edge of the span.
+  local best = nil
+
   for s_off = 1, #region do
     local candidate = region:sub(s_off)
     -- strip leading non-reference chars (open brackets, backslashes, spaces)
-    candidate = candidate:gsub("^[%s%(%)%[%]{}\\]+", "")
-    if #candidate == 0 then break end
-    local ref = try_parse(candidate)
+    local stripped = candidate:gsub("^[%s%(%)%[%]{}\\]+", "")
+    if #stripped == 0 then break end
+    local ref = try_parse(stripped)
     if ref then
-      -- Quick sanity: the original cursor position should fall inside this token
-      return ref
+      -- Locate the token's span in line byte coordinates. It starts at the
+      -- first unstripped byte and ends at its chapter:verse part (plus any
+      -- verse range, if present).
+      local strip_len   = #candidate - #stripped
+      local span_start  = win_start + (s_off - 1) + strip_len
+      local span_finish = span_start
+      local cv     = tostring(ref.chapter) .. ":" .. tostring(ref.verse_start)
+      local cv_pos = stripped:find(cv, 1, true)
+      if cv_pos then
+        span_finish = span_start + cv_pos + #cv - 2
+        if ref.verse_end then
+          local rest  = stripped:sub(cv_pos + #cv)
+          local range = rest:match("^(%-%d+)")
+                      or rest:match("^\xE2\x80\x93%d+")
+                      or rest:match("^\xE2\x80\x94%d+")
+          if range then span_finish = span_finish + #range end
+        end
+      end
+
+      local dist
+      if cursor < span_start then
+        dist = span_start - cursor
+      elseif cursor > span_finish then
+        dist = cursor - span_finish
+      else
+        dist = 0
+      end
+
+      -- Strict < keeps the leftmost candidate on ties (deterministic).
+      if not best or dist < best.dist then
+        best = { ref = ref, dist = dist }
+      end
     end
   end
-  return nil
+
+  return best and best.ref or nil
 end
 
 return M

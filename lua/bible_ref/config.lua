@@ -2,11 +2,19 @@
 --- Version registry: dynamic dataset discovery, labels, and stateful rotation.
 ---
 --- Datasets live under a data directory (default: <plugin_root>/data/):
----   bible.json         → tag "ESV"  (primary / fallback dataset)
 ---   bible_<tag>.json   → tag = <tag>:upper()  (e.g. bible_kjv.json → "KJV")
 ---
---- Discovery is lazy: the directory is scanned on first use, never at module
---- load time.
+--- When the user does not set `default_version`, the version tagged WEB
+--- (World English Bible, public domain) is selected if present, else index 1.
+---
+--- A `user/` subdirectory (default <plugin_root>/data/user/) is scanned as
+--- well. A dataset there shadows a same-named dataset in the parent — this is
+--- the "user override" slot for private/licensed translations: the repo ships
+--- public-domain datasets in data/, the user keeps their own in data/user/
+--- (gitignored).
+---
+--- Discovery is lazy: the directories are scanned on first use, never at
+--- module load time.
 
 local M = {}
 
@@ -36,8 +44,14 @@ local KNOWN_LABELS = {
 -- ---------------------------------------------------------------------------
 -- Internal state
 -- ---------------------------------------------------------------------------
-local _versions = nil -- ordered list of { tag, file, path, label, aliases }
-local _current  = 1    -- 1-based index into _versions
+local _versions      = nil -- ordered list of { tag, file, path, label, aliases }
+local _current       = 1    -- 1-based index into _versions
+local _default_index = 1    -- version selected at setup() (explicit default,
+                            -- else the built-in WEB default, else index 1)
+
+--- Built-in default tag: used when the user does not set `default_version`
+--- and a version with this tag exists in the registry.
+M.DEFAULT_TAG = "WEB"
 
 -- ---------------------------------------------------------------------------
 -- Defaults
@@ -56,55 +70,87 @@ end
 -- Discovery
 -- ---------------------------------------------------------------------------
 
+--- Derive the version tag from a dataset filename: `bible_<tag>.json` with
+--- the tag uppercased (letters, digits, underscores, hyphens).
+---@param filename string
+---@return string
+local function tag_of(filename)
+  return filename:match("^bible_([%w_%-]+)%.json$"):upper()
+end
+
 --- Build one version entry from a data filename.
 ---@param filename string
 ---@param data_dir string
 ---@return table
 local function make_version(filename, data_dir)
-  local path = data_dir .. "/" .. filename
-  if filename == "bible.json" then
-    return {
-      tag     = "ESV",
-      file    = filename,
-      path    = path,
-      label   = KNOWN_LABELS.ESV,
-      aliases = { "DEFAULT", "PRIMARY" },
-    }
-  end
-  local tag = filename:match("^bible_([%w_%-]+)%.json$"):upper()
+  local tag = tag_of(filename)
   return {
     tag     = tag,
     file    = filename,
-    path    = path,
+    path    = data_dir .. "/" .. filename,
     label   = KNOWN_LABELS[tag] or tag,
     aliases = {},
   }
 end
 
---- Scan a data directory for Bible datasets.
---- Matches `bible.json` and `bible_<tag>.json` (tag: letters, digits,
---- underscores, hyphens). Returns an ordered list with `bible.json` first
---- and the remaining files in alphabetical order (deterministic across
---- sessions).
----@param data_dir string|nil
----@return table[]
-function M.discover_versions(data_dir)
-  data_dir = data_dir or default_data_dir()
+--- Scan one directory for dataset filenames (`bible_<tag>.json`), sorted
+--- alphabetically (deterministic across sessions).
+---@param data_dir string
+---@return string[]
+local function scan_dir(data_dir)
   local names = {}
   if vim.fn.isdirectory(data_dir) == 1 then
     for _, name in ipairs(vim.fn.readdir(data_dir)) do
-      if name == "bible.json" or name:match("^bible_[%w_%-]+%.json$") then
+      if name:match("^bible_[%w_%-]+%.json$") then
         table.insert(names, name)
       end
     end
   end
-  -- "bible.json" sorts before "bible_*.json" because '.' (0x2E) < '_' (0x5F),
-  -- so a plain sort already puts the primary dataset first.
   table.sort(names)
+  return names
+end
+
+--- Scan `<data_dir>` and `<data_dir>/user` for Bible datasets.
+---
+--- Shadowing: a dataset in `user/` with the same name as one in the parent
+--- (same filename ⇒ same tag) *replaces* the parent's copy — the user path
+--- wins, and a warning is emitted once. This is the "user override" slot for
+--- private/licensed translations.
+---
+--- The merged list is ordered by filename, alphabetically (deterministic
+--- across sessions).
+---@param data_dir string|nil
+---@return table[]
+function M.discover_versions(data_dir)
+  data_dir = data_dir or default_data_dir()
+  local user_dir = data_dir .. "/user"
+
+  local public = scan_dir(data_dir)
+  local user_  = scan_dir(user_dir)
+
+  local public_set = {}
+  for _, name in ipairs(public) do public_set[name] = true end
+  for _, name in ipairs(user_) do
+    if public_set[name] then
+      vim.notify(string.format(
+        "[bible_ref] %s shadows %s (tag %s) — using the user copy",
+        user_dir .. "/" .. name, data_dir .. "/" .. name, tag_of(name)),
+        vim.log.levels.WARN)
+    end
+  end
+
+  -- Merge by filename; user entries replace parent entries.
+  local dir_of = {}
+  for _, name in ipairs(public) do dir_of[name] = data_dir end
+  for _, name in ipairs(user_) do dir_of[name] = user_dir end
+
+  local filenames = {}
+  for name in pairs(dir_of) do table.insert(filenames, name) end
+  table.sort(filenames)
 
   local versions = {}
-  for _, name in ipairs(names) do
-    table.insert(versions, make_version(name, data_dir))
+  for _, name in ipairs(filenames) do
+    table.insert(versions, make_version(name, dir_of[name]))
   end
   return versions
 end
@@ -143,25 +189,48 @@ function M.setup(opts)
     if #_versions == 0 then
       -- No datasets found anywhere: register a single placeholder so the UI
       -- layer can report "not present in DEFAULT" instead of crashing.
-      local dir = opts.data_dir or default_data_dir()
       _versions = {
-        { tag = "DEFAULT", file = "bible.json", path = dir .. "/bible.json",
-          label = "Default", aliases = { "ESV" } },
+        { tag = "DEFAULT", file = nil, path = nil,
+          label = "Default", aliases = {} },
       }
     end
   end
 
-  -- Resolve the starting version (tag/name or 1-based index)
-  if type(opts.default_version) == "string" then
-    local i = M.find_version_index(opts.default_version)
-    if i then _current = i end
-  elseif type(opts.default_version) == "number" then
-    if opts.default_version >= 1 and opts.default_version <= #_versions then
-      _current = opts.default_version
+  -- Resolve the starting version. setup() always ends with a valid starting
+  -- version, so a re-setup can never silently inherit the previous active
+  -- version. Precedence:
+  --   1. opts.default_version — an explicit tag/name (string, case-
+  --      insensitive) or 1-based index. Unknown values warn and fall
+  --      through to (2).
+  --   2. the built-in default: the version tagged WEB (World English
+  --      Bible), if present; otherwise index 1.
+  local target = 1
+  for i, v in ipairs(_versions) do
+    if v.tag == M.DEFAULT_TAG then
+      target = i
+      break
     end
-  else
-    _current = 1
   end
+
+  if opts.default_version ~= nil then
+    local resolved
+    if type(opts.default_version) == "number"
+        and opts.default_version >= 1 and opts.default_version <= #_versions then
+      resolved = opts.default_version
+    else
+      resolved = M.find_version_index(opts.default_version)
+    end
+    if resolved then
+      target = resolved
+    else
+      vim.notify(string.format(
+        "[bible_ref] default_version %q not found; using %s",
+        tostring(opts.default_version), tostring(_versions[target].tag)),
+        vim.log.levels.WARN)
+    end
+  end
+  _current       = target
+  _default_index = target
 
   return _versions
 end
@@ -286,11 +355,18 @@ function M.version_path(tag_or_name)
   return v and v.path
 end
 
+--- 1-based index of the version selected at setup(): the user's
+--- `default_version`, or the built-in default (tag WEB, else index 1).
+---@return number
+function M.get_default_version_index()
+  return _default_index
+end
+
 -- ---------------------------------------------------------------------------
 -- Backward compatibility (v1 API surface)
 -- ---------------------------------------------------------------------------
 function M.get_available_versions() return M.get_versions() end
-function M.get_default_version()   return M.get_current_version_index() end
+function M.get_default_version()   return _default_index end
 function M.set_default_version(idx) return M.set_current_version_index(idx) end
 function M.next_version(idx)       return M.next_version_index(idx) end
 function M.prev_version(idx)       return M.prev_version_index(idx) end

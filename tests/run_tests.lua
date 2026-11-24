@@ -123,6 +123,69 @@ check_parse("(cf. Jas 3:1)",      "James",          3, 1)
 check_parse("[1 Cor 4:2]",        "1 Corinthians",  4, 2)
 
 -- ---------------------------------------------------------------------------
+-- Tests: Multi-citation lines (parse.ref_at_cursor, B1 regression)
+-- ---------------------------------------------------------------------------
+-- A line may carry several citations; the reference under the cursor must be
+-- the one whose span contains (or is nearest to) the cursor byte — not always
+-- the leftmost citation on the line.
+section("Multi-Citation Hover (B1 regression)")
+
+local function ref_at(line, col0)
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { line })
+  vim.api.nvim_set_current_buf(buf)
+  vim.api.nvim_win_set_cursor(0, { 1, math.min(col0, #line - 1) })
+  local ref = parse.ref_at_cursor()
+  vim.api.nvim_buf_delete(buf, { force = true })
+  return ref
+end
+
+-- "Jas 3:1" occupies bytes 5-11; "1 Cor 4:2" occupies bytes 17-25.
+local line2 = "See Jas 3:1 and 1 Cor 4:2 in context."
+
+do
+  local r = ref_at(line2, 4) -- on the "J" of "Jas"
+  ok("cursor on 'Jas 3:1' → James 3:1",
+    r ~= nil and r.book == "James" and r.chapter == 3 and r.verse_start == 1,
+    "got: " .. tostring(r and r.book))
+end
+
+do
+  local r = ref_at(line2, 18) -- on the "C" of "Cor"
+  ok("cursor on '1 Cor 4:2' → 1 Corinthians 4:2 (not the leftmost citation)",
+    r ~= nil and r.book == "1 Corinthians" and r.chapter == 4 and r.verse_start == 2,
+    "got: " .. tostring(r and r.book))
+end
+
+do
+  local r = ref_at(line2, 12) -- on the "a" of "and" — closer to Jas 3:1
+  ok("cursor between citations, nearer the left → James 3:1",
+    r ~= nil and r.book == "James" and r.verse_start == 1,
+    "got: " .. tostring(r and r.book))
+end
+
+do
+  local r = ref_at(line2, 14) -- on the "d" of "and" — closer to 1 Cor 4:2
+  ok("cursor between citations, nearer the right → 1 Corinthians 4:2",
+    r ~= nil and r.book == "1 Corinthians" and r.verse_start == 2,
+    "got: " .. tostring(r and r.book))
+end
+
+do
+  local r = ref_at("cf. Jas 3:1 in context", 4) -- on the "J" of "Jas"
+  ok("single citation after a 'cf.' prefix → James 3:1",
+    r ~= nil and r.book == "James" and r.verse_start == 1,
+    "got: " .. tostring(r and r.book))
+end
+
+do
+  local r = ref_at("cf. Jas 3:1 in context", 15) -- on the "i" of "in"
+  ok("cursor past the token → nearest citation wins (James 3:1)",
+    r ~= nil and r.book == "James" and r.verse_start == 1,
+    "got: " .. tostring(r and r.book))
+end
+
+-- ---------------------------------------------------------------------------
 -- Tests: Version registry & rotation (config.lua)
 -- ---------------------------------------------------------------------------
 -- Hermetic: build a temporary data directory so the suite never depends on
@@ -140,7 +203,7 @@ local function write_dataset(filename, obj)
   f:close()
 end
 
-write_dataset("bible.json", {
+write_dataset("bible_web.json", {
   ["James 1:1"]         = "James, a servant of God and of the Lord Jesus Christ.",
   ["James 1:2"]         = "Count it all joy, my brothers, when you meet trials of various kinds,",
   ["James 1:3"]         = "for you know that the testing of your faith produces steadfastness.",
@@ -159,12 +222,14 @@ write_dataset("bible_testb.json", {
 cfg.setup({ data_dir = data_dir })
 local versions = cfg.get_versions()
 
-ok("discovered exactly 2 versions (bible.json, bible_testb.json)",
+ok("discovered exactly 2 versions (bible_web.json, bible_testb.json)",
   #versions == 2, "got: " .. tostring(#versions))
 
-ok("first version tagged ESV (bible.json)",
-  versions[1] and versions[1].tag == "ESV",
-  "got: " .. tostring(versions[1] and versions[1].tag))
+ok("no default_version → built-in WEB selected even though it is index 2",
+  cfg.find_version_index("WEB") == 2
+    and cfg.get_current_version_index() == 2,
+  "current=" .. tostring(cfg.get_current_version_index())
+    .. " WEB_idx=" .. tostring(cfg.find_version_index("WEB")))
 
 ok("TESTB discovered (bible_testb.json → uppercased tag)",
   cfg.find_version_index("TESTB") ~= nil)
@@ -190,7 +255,7 @@ ok("current index follows set_version",
 ok("set_version('bogus') returns false",
   cfg.set_version("bogus") == false)
 
-cfg.set_version("ESV") -- restore primary as active
+cfg.set_version("WEB") -- restore the built-in default as active
 
 -- ---------------------------------------------------------------------------
 -- Tests: Database lookup (db.lua)
@@ -231,8 +296,8 @@ ok("TESTB James 1:1 found via explicit tag (distinct text)",
   "got: " .. db.lookup("TESTB", "James", 1, 1):sub(1, 60))
 
 ok("TESTB lookup by 1-based index",
-  db.lookup(2, "James", 1, 1):find("TESTB:") ~= nil,
-  "got: " .. db.lookup(2, "James", 1, 1):sub(1, 60))
+  db.lookup(1, "James", 1, 1):find("TESTB:") ~= nil,
+  "got: " .. db.lookup(1, "James", 1, 1):sub(1, 60))
 
 ok("TESTB absent book → graceful 'not present in TESTB'",
   db.lookup("TESTB", "Genesis", 1, 1):find("not present in TESTB") ~= nil,
@@ -256,9 +321,9 @@ ok("all_entries('TESTB') excludes Genesis",
   end)(),
   "expected 4 TESTB entries, no Genesis")
 
-ok("all_entries('ESV') has 5 entries in canonical order",
+ok("all_entries('WEB') has 5 entries in canonical order",
   (function()
-    local es = db.all_entries("ESV")
+    local es = db.all_entries("WEB")
     if #es ~= 5 then return false end
     return es[1].ref.book == "Genesis" and es[#es].ref.book == "James"
   end)(),
@@ -270,6 +335,98 @@ ok("TESTB marked loaded after queries", db_loaded_testb == true)
 
 -- Cleanup temp dir
 vim.fn.delete(data_dir, "rf")
+
+-- ---------------------------------------------------------------------------
+-- Tests: data/user/ shadowing & default_version (hermetic)
+-- ---------------------------------------------------------------------------
+section("data/user/ Discovery & default_version (hermetic)")
+
+local dir2 = vim.fn.tempname()
+assert(vim.fn.mkdir(dir2, "p") == 1)
+assert(vim.fn.mkdir(dir2 .. "/user", "p") == 1)
+
+local function write_at(dir, filename, obj)
+  local f = io.open(dir .. "/" .. filename, "w")
+  f:write(vim.json.encode(obj))
+  f:close()
+end
+
+-- Shipped (public) KJV, plus a private user copy that shadows it.
+write_at(dir2, "bible_kjv.json", { ["James 1:1"] = "PUBLIC KJV text." })
+write_at(dir2 .. "/user", "bible_kjv.json", { ["James 1:1"] = "USER KJV text." })
+-- User-only WEB dataset.
+write_at(dir2 .. "/user", "bible_web.json", { ["James 1:1"] = "WEB text." })
+-- Stray bare bible.json files (v1 fossil): neither location is a slot any more.
+write_at(dir2, "bible.json", { ["James 1:1"] = "Stray parent text." })
+write_at(dir2 .. "/user", "bible.json", { ["James 1:1"] = "Stray user text." })
+
+cfg.setup({ data_dir = dir2 })
+local v2 = cfg.get_versions()
+
+ok("user/ shadow: KJV appears exactly once in registry",
+  (function()
+    local n = 0
+    for _, v in ipairs(v2) do if v.tag == "KJV" then n = n + 1 end end
+    return n
+  end)() == 1)
+
+local kjv_idx  = cfg.find_version_index("KJV")
+local kjv_path = kjv_idx and v2[kjv_idx].path or "nil"
+
+ok("user/ shadow: KJV resolves to the user/ copy",
+  kjv_idx ~= nil and v2[kjv_idx].path:find("/user/bible_kjv.json", 1, true) ~= nil,
+  "got: " .. tostring(kjv_path))
+
+ok("user-only dataset discovered (bible_web.json → WEB)",
+  cfg.find_version_index("WEB") ~= nil)
+
+ok("stray bible.json (parent and user/) is NOT discovered",
+  (function()
+    if #v2 ~= 2 then return false end
+    for _, v in ipairs(v2) do
+      if v.file == "bible.json" or v.tag == "ESV" then return false end
+    end
+    return true
+  end)(),
+  "got: " .. tostring(#v2) .. " versions")
+
+ok("shadowed verse text resolves from the user copy, not the shipped one",
+  db.lookup("KJV", "James", 1, 1):find("USER KJV") ~= nil,
+  "got: " .. db.lookup("KJV", "James", 1, 1):sub(1, 60))
+
+-- default_version
+cfg.setup({ data_dir = dir2, default_version = "web" })
+ok("default_version='web' (case-insensitive tag) selects WEB",
+  cfg.get_current_version_index() == (cfg.find_version_index("WEB") or -1))
+
+cfg.setup({ data_dir = dir2, default_version = "bogus" })
+ok("unknown default_version falls back to built-in default (WEB present)",
+  cfg.get_current_version_index() == (cfg.find_version_index("WEB") or -1),
+  "current=" .. tostring(cfg.get_current_version_index()))
+
+-- Cleanup temp dir
+vim.fn.delete(dir2, "rf")
+
+-- ---------------------------------------------------------------------------
+-- Tests: no-WEB fallback (hermetic)
+-- ---------------------------------------------------------------------------
+section("Built-in Default Fallback (no WEB present)")
+
+local dir3 = vim.fn.tempname()
+assert(vim.fn.mkdir(dir3, "p") == 1)
+write_at(dir3, "bible_kjv.json", { ["James 1:1"] = "KJV text." })
+write_at(dir3, "bible_testb.json", { ["James 1:1"] = "TESTB text." })
+
+cfg.setup({ data_dir = dir3 })
+ok("no WEB in registry → built-in default falls back to index 1 (KJV)",
+  cfg.find_version_index("WEB") == nil
+    and cfg.find_version_index("KJV") == 1
+    and cfg.get_current_version_index() == 1,
+  "current=" .. tostring(cfg.get_current_version_index())
+    .. " KJV_idx=" .. tostring(cfg.find_version_index("KJV")))
+
+-- Cleanup temp dir
+vim.fn.delete(dir3, "rf")
 
 -- ---------------------------------------------------------------------------
 -- Summary

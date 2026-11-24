@@ -1,0 +1,19 @@
+# --- Private datasets (licensed translations) — never committed -------------
+# The user override slot: drop bible_*.json here and it is discovered
+# automatically, shadowing same-named public datasets. See README "Data".
+data/user/
+
+# --- Author pipeline, debug artifacts, notes and things (kept on disk, out of the repo) ------
+scripts/
+data/*.py
+data/archived_bibles/
+./AGENT_INSTRUCTIONS.md
+
+# --- Scratch & logs ----------------------------------------------------------
+*.log
+.swap
+*.swp
+test_loader.lua
+test_runner.py
+test_script.lua
+run_tests.sh

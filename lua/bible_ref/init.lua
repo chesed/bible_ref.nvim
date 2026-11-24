@@ -22,12 +22,14 @@ local DEFAULTS = {
   versions = nil,
 
   --- Starting active version: tag/name (string) or 1-based index (number).
+  --- When unset, the built-in default applies: tag WEB if present, else
+  --- the first dataset in the registry.
   default_version = nil,
 
   --- Picker options:
   ---   backend        "auto" | "fzf-lua" | "select"
   ---   append_version append the version tag to inserted refs when the active
-  ---                  version is not the primary dataset (e.g. "Jas 3:1 KJV")
+  ---                  version is not the default dataset (e.g. "Jas 3:1 KJV")
   picker = {
     backend        = "auto",
     append_version = false,
@@ -185,9 +187,18 @@ function M.setup(opts)
 
   -- v1 backward-compat: a single json_path collapses the registry.
   if config.json_path then
+    -- Derive the tag from the filename (bible_kjv.json → KJV, esv.json →
+    -- ESV). A bare bible.json carries no tag information → DEFAULT.
+    local name = vim.fn.fnamemodify(config.json_path, ":t")
+    local tag  = name:match("^bible_([%w_%-]+)%.json$")
+    if not tag then
+      local bare = name:match("^([%w_%-]+)%.json$")
+      if bare and bare:lower() ~= "bible" then tag = bare end
+    end
+    tag = (tag or "DEFAULT"):upper()
     cfg_opts.versions = {
-      { tag = "ESV", file = vim.fn.fnamemodify(config.json_path, ":t"),
-        path = config.json_path, label = "ESV", aliases = { "DEFAULT" } },
+      { tag = tag, file = name, path = config.json_path,
+        label = tag == "DEFAULT" and "Default" or tag, aliases = { "DEFAULT" } },
     }
   elseif config.versions and #config.versions > 0 then
     cfg_opts.versions = config.versions

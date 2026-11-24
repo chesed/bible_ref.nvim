@@ -2,14 +2,27 @@
 
 A modular Neovim Lua plugin for Bible reference inspection and SBL-style citation insertion. Designed for Markdown, LaTeX, and plain-text theological writing.
 
-> [!NOTE]
-> **Development status:** Core implementation complete and passing all 53 unit tests (Neovim 0.12.6 headless). One remaining task before the plugin is fully usable: placing a Bible JSON dataset at `data/bible.json`. See [Data](#data) and [Development Log](#development-log).
+> **Status (2026-11-23):** v1.0 — first public release. Multi-version dataset
+> support: automatic discovery of every translation in `data/` and `data/user/`,
+> lazy per-version indexing, version cycling in both the hover window and the
+> picker, and span-aware hover on lines with multiple citations.
+> 84/84 headless unit tests passing.
 
 ## Features
 
-- **`:BibleHover`** — Inspect any Bible reference under the cursor in an LSP-style floating window; press `l` to open it in [Logos.com](https://logos.com).
-- **`:BiblePick`** — Fuzzy-search all verses (via `fzf-lua` or `vim.ui.select`) and insert an SBL-formatted abbreviation at the cursor (`Jas 1:1`, `1 Cor 4:2`, etc.).
+- **`:BibleHover`** — Inspect any Bible reference under the cursor in an LSP-style floating window.
+  - `<Space>` / `<Tab>` — next installed translation
+  - `<S-Tab>` — previous translation (wraps around)
+  - `l` — open the passage in Logos
+  - `q` / `<Esc>` — close
+- **`:BiblePick`** — Fuzzy-search all verses of the active dataset (`fzf-lua` primary, `vim.ui.select` fallback) and insert an SBL-formatted abbreviation at the cursor (`Jas 1:1`, `1 Cor 4:2`, …).
+  - `TAB` — cycle to the next dataset (picker reopens with the new dataset)
+  - `<CR>` — insert the reference (optionally with the version tag)
+  - `<C-l>` / `<C-o>` — open the highlighted verse in Logos
+- **`:BibleVersion [tag]`** — Without arguments: list installed datasets and mark the active one. With an argument (`:BibleVersion KJV`): set it active. Case-insensitive.
 - **`:BibleOpenLogos`** — Open the reference under the cursor directly in Logos.com.
+- **Multi-version datasets** — Any number of translations live side by side in `data/`; each is loaded lazily on first use.
+- **Translation-aware insertion** — Optionally append the version tag to inserted references when the active dataset is not the default one (`Jas 3:1 KJV`).
 
 Understands a wide range of reference formats:
 
@@ -20,13 +33,13 @@ Understands a wide range of reference formats:
 | `1 Cor. 4:2–5`     | 1 Corinthians 4:2–5     |
 | `2 Pet 1:4`        | 2 Peter 1:4             |
 | `1Cor 4:2`         | 1 Corinthians 4:2       |
-| `(cf. Jas 3:1)`    | James 3:1 (strips parens)|
+| `(cf. Jas 3:1)`    | James 3:1 (strips parens) |
 | `\bref{Jas 3:1}`   | James 3:1 (strips LaTeX) |
 
 ## Requirements
 
 - Neovim ≥ 0.10
-- A verse-by-verse JSON Bible dataset (see [Data](#data))
+- At least one verse-by-verse JSON dataset for the whole Bible. Package includes three open-source datasets: (1) the WEB bible (default); (2) the KJV; (3) an original-language dataset composed of the WLC for Hebrew and SBLGNT for Greek (see [Data](#data))
 - [`fzf-lua`](https://github.com/ibhagwan/fzf-lua) *(recommended)* or any `vim.ui.select` provider (e.g. `snacks.nvim`)
 
 ## Installation
@@ -35,11 +48,9 @@ Understands a wide range of reference formats:
 
 ```lua
 {
-  "your-username/bible_ref.nvim",
+  "chesed/bible_ref.nvim",
   config = function()
     require("bible_ref").setup({
-      -- json_path defaults to <plugin_root>/data/bible.json
-      -- json_path = vim.fn.expand("~/.local/share/nvim/bible/esv.json"),
       keymaps = {
         hover      = "<leader>bh",
         pick       = "<leader>bp",
@@ -52,46 +63,61 @@ Understands a wide range of reference formats:
 
 ## Data
 
-The plugin looks for a JSON Bible dataset at `<plugin_root>/data/bible.json`.
+Datasets are **discovered automatically** from two directories (default
+`<plugin_root>/data/` and `<plugin_root>/data/user/`):
 
-**Expected schema (flat map):**
+| Location       | Purpose                                                        |
+|----------------|----------------------------------------------------------------|
+| `data/`        | Public datasets, shipped with the repository                   |
+| `data/user/`   | **Your** private datasets — add your own datasets here (see [Data Format](#data-format))        |
+
+In both directories:
+
+| File               | Tag            | Role                                    |
+|--------------------|----------------|------------------------------------------|
+| `bible_<tag>.json` | `<TAG>` upper | A translation; hyphens allowed          |
+
+Examples: `bible_kjv.json` → `KJV`, `bible_wlc-sblgnt.json` → `WLC-SBLGNT`.
+Well-known tags get human-readable labels in the `:BibleVersion` list (e.g.
+`WLC-SBLGNT` → "Westminster Leningrad Codex + SBL Greek NT"); unknown tags fall
+back to the uppercase tag itself.
+
+**Shadowing (the override slot):** a file in `data/user/` with the same name
+as one in `data/` replaces the shipped copy — same name ⇒ same tag — with a
+one-time warning. Drop a `bible_kjv.json` you prefer into `data/user/` and it
+silently wins.
+
+**Shipped in this repository (public domain):** WEB (`bible_web.json`, the
+built-in default), KJV (`bible_kjv.json`), and WLC-SBLGNT
+(`bible_wlc-sblgnt.json` — Westminster Leningrad Codex Hebrew OT + SBL Greek
+NT, 31,083 entries). A fresh clone therefore starts its rotation with WEB;
+set `default_version` to change the starting dataset.
+
+### Data Format
+
+**Supported schemas** (auto-detected per file):
 
 ```json
-{
-  "Genesis 1:1": "In the beginning, God created the heavens and the earth.",
-  "Genesis 1:2": "The earth was without form and void...",
-  ...
-}
+{ "Genesis 1:1": "In the beginning, God created the heavens and the earth.", ... }
 ```
 
-The array-of-objects schema is also supported:
+or
 
 ```json
-[
-  { "book": "Genesis", "chapter": 1, "verse": 1, "text": "In the beginning..." },
-  ...
-]
+[ { "book": "Genesis", "chapter": 1, "verse": 1, "text": "In the beginning..." }, ... ]
 ```
 
-### Getting a dataset
+> **Graceful misses:** verses absent from a dataset (e.g. an OT reference against a
+> Greek NT-only dataset) render as `[Mal 4:6 — not present in WLC-SBLGNT]` instead
+> of crashing.
 
-A freely usable ESV-style dataset can be obtained from open-source sources such as:
-- [acbellini/esv-json](https://github.com/acbellini/esv-json) — ESV flat map
-- [scrollmapper/bible_databases](https://github.com/scrollmapper/bible_databases) — multi-translation exports
-
-> **Note:** ESV text is copyright Crossway. For personal use only. The plugin is translation-agnostic; substitute any dataset using the same schema.
-
-Place the file at `data/bible.json` inside the plugin repo, or configure a custom path:
-
-```lua
-require("bible_ref").setup({
-  json_path = vim.fn.expand("~/.local/share/nvim/bible/esv.json"),
-})
-```
+Sources for free datasets (will need to be converted to match the schema's described above): [scrollmapper/bible_databases](https://github.com/scrollmapper/bible_databases).
 
 ## Usage
 
-### Keymaps (default)
+### Commands & global keymaps
+
+Default keymaps can be changed via config options.
 
 | Keymap       | Command            | Action                               |
 |--------------|--------------------|--------------------------------------|
@@ -101,28 +127,50 @@ require("bible_ref").setup({
 
 ### In the floating preview window
 
-| Key       | Action                    |
-|-----------|---------------------------|
-| `l`       | Open passage in Logos.com |
-| `q`/`Esc` | Close preview             |
+| Key          | Action                                          |
+|--------------|-------------------------------------------------|
+| `<Space>`,`<Tab>` | Next translation (wraps)                  |
+| `<S-Tab>`    | Previous translation (wraps)                   |
+| `l`          | Open passage in Logos.com                      |
+| `q`/`<Esc>`  | Close preview                                  |
+
+The window header shows the reference and the active tag: `Jas 3:1  [Version: KJV]`.
 
 ### In the picker
 
-| Key    | Action                                    |
-|--------|-------------------------------------------|
-| `<CR>` | Insert SBL reference at cursor position   |
-| `<C-l>`| Open highlighted verse in Logos.com       |
-| `<C-o>`| Open highlighted verse in Logos.com (alt) |
+| Key          | Action                                          |
+|--------------|-------------------------------------------------|
+| `<CR>`       | Insert SBL reference at cursor position         |
+| `<C-v>`      | Cycle dataset (prompt shows the new tag)        |
+| `<C-l>`/`<C-o>` | Open highlighted verse in Logos.com         |
+
+The prompt reflects the active dataset: `Bible [KJV] >`.
 
 ## Configuration
 
 ```lua
 require("bible_ref").setup({
-  -- Path to Bible JSON dataset
-  json_path = nil,  -- defaults to <plugin_root>/data/bible.json
+  -- Directory to scan for datasets (default <plugin_root>/data/)
+  data_dir = nil,
 
-  -- Preferred picker: "fzf-lua" | "select" | "auto" (default)
-  picker = "auto",
+  -- Explicit version list, overriding directory discovery:
+  -- versions = {
+  --   { tag = "ESV",  path = "/abs/path/esv.json",  label = "ESV" },
+  --   { tag = "KJV",  path = "/abs/path/kjv.json",  label = "KJV" },
+  -- },
+
+  -- Starting active version (tag string or 1-based index).
+  -- Case-insensitive tag; the tag is whatever follows `bible_` in the
+  -- filename — e.g. default_version = "esv" selects bible_esv.json.
+  -- When unset, the built-in default applies: WEB, if present; otherwise
+  -- the first dataset in the registry.
+  default_version = nil,
+
+  -- Picker
+  picker = {
+    backend        = "auto",   -- "auto" | "fzf-lua" | "select"
+    append_version = false,    -- true → "Jas 3:1 KJV" for non-default datasets
+  },
 
   -- Global keymap bindings (set any to false to disable)
   keymaps = {
@@ -130,7 +178,25 @@ require("bible_ref").setup({
     pick       = "<leader>bp",
     open_logos = "<leader>bl",
   },
+
+  -- Which filetypes to restrict keymaps to (empty = all)
+  filetypes = {},
+
+  -- v1 backward-compat: a single dataset path collapses the registry
+  json_path = nil,
 })
+```
+
+## Lua API
+
+```lua
+require("bible_ref").setup(opts)          -- see Configuration
+require("bible_ref").set_version("KJV")   -- set active dataset (case-insensitive); returns bool
+require("bible_ref").get_version()        -- active version entry
+require("bible_ref").get_version("KJV")   -- entry by tag or 1-based index
+require("bible_ref").get_versions()       -- all registered versions, in order
+require("bible_ref").get_current_version()
+require("bible_ref").opts()               -- merged options after setup()
 ```
 
 ## SBL Abbreviations
@@ -141,90 +207,39 @@ All 66 canonical books are mapped to SBL 2nd-edition standard abbreviations (no 
 
 ## Testing
 
-Run the headless test suite:
-
 ```bash
-nvim --headless -u NONE -l tests/run_tests.lua
+luac -p lua/bible_ref/*.lua lua/bible_ref/ui/*.lua   # syntax
+nvim --headless -u NONE -l tests/run_tests.lua        # unit suite (84 tests)
 ```
 
-Tests cover:
-1. SBL abbreviation resolution and formatting
-2. Reference parsing (all major formats and edge cases)
-3. Database lookup (single verse, range, missing verse fallback)
+The suite is **hermetic**: it builds its own temporary dataset directories
+(`WEB`/`TESTB`/`KJV`), so it never depends on which datasets live in `data/`.
+Covers: SBL formatting, reference parsing, multi-citation hover (cursor-span
+selection), per-version lookups and ranges, version discovery/rotation, the
+built-in default (WEB, with no-WEB fallback), `data/user/` shadowing, and
+lazy-load markers.
 
 ## Architecture
 
 ```
 lua/bible_ref/
-├── init.lua       Public API, setup(), user command registration
-├── db.lua         JSON loader (lazy), verse index, lookup + range
-├── parse.lua      Reference parser, alias resolution, cursor span
-├── sbl.lua        SBL book map and reference formatter
-├── logos.lua      Logos.com URL builder and browser launcher
+├── init.lua       Public API, setup(), user command + keymap registration
+├── config.lua     Version registry: discovery, labels, stateful rotation
+├── db.lua         Lazy per-version JSON index; lookup/lookup_range (dual signature)
+├── parse.lua      Reference parser, alias resolution, cursor span extraction
+├── sbl.lua        SBL book map, reference formatter, canonical book order
+├── logos.lua      Logos URL builder and browser launcher
 └── ui/
-    ├── float.lua  LSP-style floating window preview
-    └── picker.lua fzf-lua / vim.ui.select picker integration
+    ├── float.lua  LSP-style floating window with version-cycling keymaps
+    └── picker.lua fzf-lua / vim.ui.select picker with dataset cycling
 ```
 
----
+## License
 
-## Development Log
+MIT — see [LICENSE](LICENSE).
 
-### Session 1 — 2026-11-22
+## Roadmap
 
-**Agent:** Antigravity (Claude Sonnet 4.6 Thinking)
-**Neovim version:** 0.12.6 / LuaJIT 2.1
-
-#### What was built
-
-Scaffolded the complete plugin from the `AGENT_SPEC.md` blueprint. All seven Lua modules were written, iterated on, and brought to a fully passing test suite in a single session.
-
-**Files created:**
-
-| File | Purpose |
-|------|---------|
-| `lua/bible_ref/init.lua` | `setup()`, user commands, default keymaps |
-| `lua/bible_ref/db.lua` | Lazy JSON loader, verse index, single + range lookup |
-| `lua/bible_ref/parse.lua` | Reference parser, alias table (all 66 books × variants), cursor-span extractor |
-| `lua/bible_ref/sbl.lua` | SBL 2nd-ed. abbreviation map, `format()` function |
-| `lua/bible_ref/logos.lua` | Logos.com URL builder, `vim.ui.open` + `xdg-open` fallback |
-| `lua/bible_ref/ui/float.lua` | LSP-style `nvim_open_win` preview with `q`/`Esc`/`l` keymaps |
-| `lua/bible_ref/ui/picker.lua` | fzf-lua primary picker with `<CR>` insert + `<C-l>`/`<C-o>` Logos actions; `vim.ui.select` fallback |
-| `tests/run_tests.lua` | Headless unit test runner (no external test framework required) |
-| `data/README.md` | Dataset acquisition instructions |
-| `README.md` | This file |
-
-#### Design decisions made
-
-- **Translation:** ESV as target translation, but schema is fully agnostic — user configures any flat-map or array-of-objects JSON via `setup({ json_path = "..." })`.
-- **Dataset location:** `data/bible.json` inside the plugin repo (default); user-configurable via `setup()`.
-- **Picker:** `fzf-lua` primary (detected via `pcall(require, "fzf-lua")`), `vim.ui.select` fallback — compatible with `snacks.nvim` picker which implements `vim.ui.select`.
-- **URL opener:** `vim.ui.open` (Neovim 0.10+) with `xdg-open` fallback.
-- **Lazy loading:** JSON dataset is not read at startup — deferred until first `:BibleHover` or `:BiblePick` invocation.
-- **Multi-byte ranges:** en-dash (`–` U+2013) and em-dash (`—` U+2014) are handled as explicit 3-byte UTF-8 sequences in the parser (Lua `string.find` is byte-level).
-
-#### Parser edge cases resolved
-
-Three edge cases required iteration to pass tests:
-
-1. **Dotted abbreviations** (`Jas. 3:1`) — initial `cf.`-prefix stripping accidentally consumed book abbrevs with dots. Fixed with an explicit `known_prefixes` allowlist.
-2. **Compressed numbered books** (`1Cor 4:2`) — initial regex required a space after the digit prefix. Fixed by detecting `^([123])%u` (digit immediately followed by uppercase).
-3. **En-dash verse ranges** (`4:2–5`) — the `[%-...]` character class doesn't handle multi-byte UTF-8 sequences. Fixed by extracting verse-end separately with explicit `\xE2\x80\x93` byte pattern.
-
-#### Test results
-
-```
-nvim --headless -u NONE -l tests/run_tests.lua
-```
-
-```
-SBL Formatting    8/8  ✓
-Reference Parsing 40/40 ✓  (covers Jas./1Cor/en-dash/cf./bracket wrapping)
-Database Lookups   5/5  ✓  (single, range, missing-verse fallback)
-
-53 passed, 0 failed  — exit 0
-```
-
-#### What remains (handoff to local agent)
-
-See [`AGENT_INSTRUCTIONS.md`](AGENT_INSTRUCTIONS.md) for the complete handoff brief.
+See [PLANS.md](PLANS.md) for the post-release backlog (picker keymap
+redesign, expanded corpora: apocrypha → church fathers → pseudepigrapha →
+Qumran, and citation navigation).
