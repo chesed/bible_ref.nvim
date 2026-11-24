@@ -4,6 +4,8 @@
 --- On <CR>:       inserts SBL-formatted reference at the saved cursor position
 ---                (appends the version tag when opts.picker.append_version = true
 ---                 and the active version is not the default dataset)
+--- On <C-y>:      (fzf-lua) inserts the quoted verse text + reference at the
+---                saved cursor position, e.g.  "And the dragon stood…" (Rev 18:19)
 --- On <C-l>/<C-o>: opens the highlighted verse on logos.com
 --- On <C-v>:      (fzf-lua) cycles to the next dataset version and reopens the
 ---                picker with that version's entries
@@ -68,9 +70,24 @@ local function insert_text_for(entry)
 	return ref_str
 end
 
+--- Build the text to insert for a <C-y> quote:  "verse text" (Ref).
+--- This is the single place to change when formatting options are added.
+local function insert_text_with_ref(entry)
+	local text = type(entry.text) == "string" and entry.text or ""
+	if text == "" then
+		return insert_text_for(entry) -- no text: fall back to the plain reference
+	end
+	return '"' .. text .. '" (' .. insert_text_for(entry) .. ')'
+end
+
 --- Accept the entry: insert at the saved target position.
 local function accept_entry(entry, target)
 	insert_at(target, insert_text_for(entry))
+end
+
+--- Accept the entry as a quoted verse text:  "verse text" (Ref).
+local function accept_text_entry(entry, target)
+	insert_at(target, insert_text_with_ref(entry))
 end
 
 --- Resolve the picker backend from user config ("auto" | "fzf-lua" | "select").
@@ -126,6 +143,12 @@ local function open_fzf(target, version)
 			["default"] = function(selected)
 				if selected and selected[1] and by_label[selected[1]] then
 					accept_entry(by_label[selected[1]], target)
+				end
+			end,
+			-- <C-y>: insert quoted verse text + reference, e.g. "text…" (Rev 18:19)
+			["ctrl-y"] = function(selected)
+				if selected and selected[1] and by_label[selected[1]] then
+					accept_text_entry(by_label[selected[1]], target)
 				end
 			end,
 			-- <C-l> / <C-o>: open in Logos

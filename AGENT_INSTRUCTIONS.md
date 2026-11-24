@@ -1,8 +1,8 @@
 # Agent Work Instruction — bible_ref.nvim
 
 **Repository:** `~/Nephos/Code/neovim/bible_ref.nvim`
-**Branch:** `feature/bible-hover-version-select` (commit `116907d`, **unmerged**; release-prep changes uncommitted)
-**Status (2026-11-23):** v1.0 release-ready. All release blockers closed (B1 span-aware hover, R1–R4); 84/84 hermetic unit tests. Post-release backlog (F1–F3, Open-logic) lives in **[PLANS.md](PLANS.md)** — read it before proposing work, and respect user-deferred items.
+**Branch:** `feature/f2-float-keymaps` (HEAD `4942c18`; `master` at `c263293` = v1.0)
+**Status (2026-11-24):** v1.1 in release — citation navigation (F2), hover fallback to the first ref on the line, `<C-y>` verse-text insertion (F1), default `<leader>r*` keymaps. 125/125 hermetic unit tests. Open work: **B4 carry-over parsing (top priority)** plus the F3/Open-logic backlog in **[PLANS.md](PLANS.md)** — read it before proposing work, and respect user-deferred items.
 
 ---
 
@@ -25,10 +25,11 @@ hover, and stateful rotation shared between the float and the picker.
 
 ## 2. Current state
 
-- 2.0 feature set **complete and committed** on the feature branch (`116907d`);
-  v1.0 release-prep (B1 fix, R3/R4, tests, docs) is **uncommitted** and awaits
-  the user's commit/merge/publish.
-- Verification: `luac -p` clean; hermetic unit suite **84/84**; real-data
+- v1.0 shipped (`c263293`, tag `v1.0`, on `master`). **v1.1 in release** on
+  `feature/f2-float-keymaps`: F2 citation navigation + `<leader>r*` keymaps
+  (`4942c18`), hover fallback to the first ref on the line, and `<C-y>`
+  verse-text insertion (F1) — the latter two uncommitted at time of writing.
+- Verification: `luac -p` clean; hermetic unit suite **125/125**; real-data
   sanity across all 7 datasets (CSB, ESV, KJV, NIV, NLT, WEB, WLC-SBLGNT),
   including WEB-default selection and `default_version = "NIV"`.
 - **Release package (2026-11-23):** shipped `data/` = KJV + **WEB (built-in
@@ -130,7 +131,7 @@ tests/run_tests.lua  Hermetic unit suite (no external test framework)
 
 | Command | Behavior |
 |---------|----------|
-| `:BibleHover` | `parse.ref_at_cursor()` → `float.show(ref)`; float cycles versions |
+| `:BibleHover` | ref under cursor → `float.show(ref)`; no ref under cursor ⇒ **first ref on the line** (cursor moves onto it); float cycles versions |
 | `:BiblePick` | `picker.open()`; fzf-lua or select backend; `<C-v>` cycles dataset |
 | `:BibleVersion [tag]` | No arg: list + mark active. Arg: `set_version(tag)` |
 | `:BibleOpenLogos` | `logos.open(sbl.format(ref))` |
@@ -143,7 +144,8 @@ document (display) · `H`/`L` jump cursor to prev/next citation (float re-anchor
 version preserved) · `j`/`k` next/prev canonical verse (wraps chapters, stops at
 book edges with a notice) · `o` open (Logos, until the Open-logic item ships) ·
 `q`/`<Esc>` close.
-Picker: `<CR>` insert · `<C-v>` next dataset (code binding; the user maps TAB
+Picker: `<CR>` insert · `<C-y>` insert quoted verse text + reference
+(`"text…" (Rev 18:19)`) · `<C-v>` next dataset (code binding; the user maps TAB
 on their side — B2 closed user-side) · `<C-l>`/`<C-o>` Logos.
 
 ## 7. Testing & verification protocol
@@ -214,18 +216,32 @@ Rules:
 8. Keep the **v1 backward-compat surface** working: `db.lookup(book,ch,v)`,
    `db.lookup_range(book,ch,vs,ve)`, `db.set_path(path)`,
    `float.show(ref_str, verse_text)`, `setup({ json_path = ... })`.
+9. **Sub-agent delegation (ttop duet).** `ttop` (remote sub-agent: explore /
+   general / data-collector) is for **small, tightly-specified, mechanical
+   work only** — find-and-replace, doc sync, renames, scaffolding. **Never**
+   for logic changes, parser work, or anything requiring full module context.
+   Track record (2026-11-24): mechanical canary — *passed*; hard parser task
+   (B4) — *failed catastrophically*: rewrote `parse.lua` with a syntax error
+   and **fabricated content** (aliases for "3–12 Corinthians," books that do
+   not exist), and rewrote the test harness. After any ttop task, before
+   trusting its report: `luac -p` on touched files → full suite →
+   `git diff --stat` scope check. Never run ttop and the parent agent on the
+   same file concurrently.
 
 ## 9. What remains
 
-All bugs and release items are **closed** (B1 fixed span-aware in
-`parse.ref_at_cursor()`; B2 closed user-side — TAB mapped; B3 closed user-side;
-R1–R4 done). Everything still open is post-release backlog in
-**[PLANS.md](PLANS.md)**:
+Release items are **closed** (R1–R4 done; v1.0 published, v1.1 in release).
+Bug status: B1 fixed span-aware · B2 closed user-side (TAB) · B3 closed
+user-side · **B4 open — multi-citation carry-over, TOP PRIORITY** (PLANS.md:
+spec, acceptance strings, and the ttop failure history).
 
-- **Features:** F1 picker `<S-Return>` copy-verse-text · F2 float
-  prev/next-citation + verse navigation (implemented 2026-11-24, uncommitted —
-  awaiting user review; see PLANS.md) · F3 expanded corpora in order:
-  apocrypha → church fathers → pseudepigrapha → Qumran.
+Post-release backlog in **[PLANS.md](PLANS.md)**:
+
+- **Shipped in v1.1:** F2 float prev/next-citation + verse navigation ·
+  F1 picker verse-text insertion — as `<C-y>` `"text" (Ref)` inline insert,
+  not the original `<S-Return>` clipboard idea.
+- **Open:** B4 carry-over parsing (top priority) · F3 expanded corpora in
+  order: apocrypha → church fathers → pseudepigrapha → Qumran.
 - **Open logic:** decouple "open" from Logos — biblia.com default,
   app.logos.com as an option.
 
@@ -253,4 +269,10 @@ anything.
   (© 2026 Thomas Keene); WEB added to shipped `data/`; suite now **84/84**
   (+7: WEB default, no-WEB fallback, B1 ×6); README, `data/README.md`, this
   file, and PLANS.md updated to v1.0 framing.
+- 2026-11-24 — **v1.1 work:** F2 citation navigation + `<leader>r*` keymaps
+  committed (`4942c18`, suite 125/125); hover fallback to first ref on the
+  line; `<C-y>` verse-text insertion in the picker (F1, re-keyed from
+  `<S-Return>`); B4 (carry-over parsing) filed as top priority after the
+  ttop sub-agent attempt failed catastrophically — see §8 rule 9 and
+  PLANS.md B4 history.
 - Longer change history: `NVIM_CONFIG.md` §8.
