@@ -11,6 +11,7 @@ local M = {}
 local _indices = {} -- { [tag] = { ["Book|ch|v"] = "verse text", ... } }
 local _loaded  = {} -- { [tag] = true }
 local _paths   = {} -- { [tag] = "/abs/path/to/bible_<tag>.json" }
+local _sizes   = {} -- { [tag] = { [book] = { chapters = n, verses = { [ch] = max_v } } }
 
 local function config()
   return require("bible_ref.config")
@@ -29,6 +30,7 @@ function M.set_paths(paths)
   end
   _indices = {}
   _loaded  = {}
+  _sizes   = {}
 end
 
 --- Set the dataset path for the currently active version (v1 backward-compat).
@@ -233,6 +235,118 @@ function M.all_entries(version_tag_or_idx)
     return a.ref.verse_start < b.ref.verse_start
   end)
   return results
+end
+
+-- ---------------------------------------------------------------------------
+-- Canonical size & verse stepping (F2)
+-- ---------------------------------------------------------------------------
+
+--- Per-tag book/chapter sizes derived from the dataset's index.
+--- Built lazily on first use and cached; cleared by set_paths().
+---@param tag string
+local function sizes_for(tag)
+  if _sizes[tag] then return _sizes[tag] end
+  local idx = _indices[tag] or {}
+  local map = {}
+  for key in pairs(idx) do
+    local book, ch, v = key:match("^(.-)|(%d+)|(%d+)$")
+    if book then
+      ch, v = tonumber(ch), tonumber(v)
+      local b = map[book]
+      if not b then
+        b = { chapters = 0, verses = {} }
+        map[book] = b
+      end
+      if ch > b.chapters then b.chapters = ch end
+      if v > (b.verses[ch] or 0) then b.verses[ch] = v end
+    end
+  end
+  _sizes[tag] = map
+  return map
+end
+
+--- Highest chapter number for `book` in a dataset, or nil if the book is
+--- absent from the dataset entirely.
+---@param book string canonical book name, e.g. "James"
+---@param tag string|number|nil version tag/index (default: active version)
+---@return number|nil
+function M.max_chapter(book, tag)
+  local t = resolve_tag(tag)
+  load_version(t)
+  local b = sizes_for(t)[tostring(book)]
+  return b and b.chapters or nil
+end
+
+--- Highest verse number for `book` chapter in a dataset, or nil if the
+--- chapter is absent from the dataset.
+---@param book string canonical book name, e.g. "James"
+---@param chapter number
+---@param tag string|number|nil version tag/index (default: active version)
+---@return number|nil
+function M.max_verse(book, chapter, tag)
+  local t = resolve_tag(tag)
+  load_version(t)
+  local b = sizes_for(t)[tostring(book)]
+  return b and b.verses[tonumber(chapter) or 0] or nil
+end
+
+--- The canonical verse after `ref` within a dataset.
+---
+--- A range steps from its end: 3:1–3 → 3:4. Chapter boundaries step to the
+--- next chapter's first verse. Returns nil at the last verse of a book (or
+--- when the book is absent from the dataset) — callers notify.
+---
+---@param ref { book: string, chapter: number, verse_start: number, verse_end?: number }
+---@param tag string|number|nil version tag/index (default: active version)
+---@return { book: string, chapter: number, verse_start: number }|nil
+function M.next_verse(ref, tag)
+  local t  = resolve_tag(tag)
+  load_version(t)
+  local book = tostring(ref.book)
+  local ch   = tonumber(ref.chapter) or 0
+  local ve   = tonumber(ref.verse_end or ref.verse_start) or 0
+  local b    = sizes_for(t)[book]
+  if not b then return nil end
+
+  local mv = b.verses[ch]
+  if mv and ve < mv then
+    return { book = book, chapter = ch, verse_start = ve + 1 }
+  end
+  if ch < b.chapters then
+    return { book = book, chapter = ch + 1, verse_start = 1 }
+  end
+  return nil
+end
+
+--- The canonical verse before `ref` within a dataset.
+---
+--- A range steps to the verse before its start: 3:2–4 → 3:1. Chapter
+--- boundaries step to the last verse of the previous chapter. Returns nil
+--- at the first verse of a book (or when the book is absent from the
+--- dataset) — callers notify.
+---
+---@param ref { book: string, chapter: number, verse_start: number, verse_end?: number }
+---@param tag string|number|nil version tag/index (default: active version)
+---@return { book: string, chapter: number, verse_start: number }|nil
+function M.prev_verse(ref, tag)
+  local t  = resolve_tag(tag)
+  load_version(t)
+  local book = tostring(ref.book)
+  local ch   = tonumber(ref.chapter) or 0
+  local vs   = tonumber(ref.verse_start) or 0
+  local b    = sizes_for(t)[book]
+  if not b then return nil end
+
+  if vs > 1 then
+    return { book = book, chapter = ch, verse_start = vs - 1 }
+  end
+  if ch > 1 then
+    local mv = b.verses[ch - 1]
+    if mv then
+      return { book = book, chapter = ch - 1, verse_start = mv }
+    end
+  end
+  return nil
 end
 
 --- Return true if the dataset for a version has been loaded.

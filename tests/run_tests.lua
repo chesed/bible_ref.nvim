@@ -429,6 +429,227 @@ ok("no WEB in registry → built-in default falls back to index 1 (KJV)",
 vim.fn.delete(dir3, "rf")
 
 -- ---------------------------------------------------------------------------
+-- Tests: Line scanning (parse.find_refs_in_line, F2)
+-- ---------------------------------------------------------------------------
+section("Line Scanning (find_refs_in_line)")
+
+local parse = require("bible_ref.parse")
+
+do
+  local rs = parse.find_refs_in_line("Jas 3:1 and 1 Cor 4:2")
+  ok("two citations found in left-to-right order",
+    #rs == 2
+      and rs[1].ref.book == "James" and rs[1].ref.verse_start == 1
+      and rs[2].ref.book == "1 Corinthians" and rs[2].ref.verse_start == 2,
+    "got " .. tostring(#rs) .. " entries")
+  ok("spans are ordered and disjoint",
+    #rs == 2 and rs[1].start < rs[1].finish and rs[1].finish < rs[2].start,
+    "spans: " .. tostring(rs and rs[1] and rs[1].start) .. "-"
+      .. tostring(rs and rs[1] and rs[1].finish) .. ", "
+      .. tostring(rs and rs[2] and rs[2].start) .. "-"
+      .. tostring(rs and rs[2] and rs[2].finish))
+end
+
+do
+  local rs = parse.find_refs_in_line("(cf. Jas 3:1)")
+  ok("wrapped '(cf. Jas 3:1)' → exactly one citation (offsets deduped)",
+    #rs == 1 and rs[1].ref.book == "James" and rs[1].ref.verse_start == 1,
+    "got " .. tostring(#rs) .. " entries")
+  ok("wrapped citation span starts at 'Jas' (wrapper stripped)",
+    #rs == 1 and rs[1].start == 6 and rs[1].finish == 12,
+    "span: " .. tostring(rs and rs[1] and rs[1].start) .. "-"
+      .. tostring(rs and rs[1] and rs[1].finish))
+end
+
+do
+  local rs = parse.find_refs_in_line("Jas 3:1\u{2013}3 and 1 Cor 4:2")
+  ok("range end is included in the span",
+    #rs == 2 and rs[1].ref.verse_end == 3 and rs[1].finish == 11,
+    "got " .. tostring(#rs) .. " entries, finish "
+      .. tostring(rs and rs[1] and rs[1].finish))
+end
+
+do
+  local rs = parse.find_refs_in_line("1Cor 4:2")
+  ok("compressed '1Cor 4:2' → one citation",
+    #rs == 1 and rs[1].ref.book == "1 Corinthians" and rs[1].ref.verse_start == 2,
+    "got " .. tostring(#rs) .. " entries")
+end
+
+ok("empty line → no citations", #parse.find_refs_in_line("") == 0)
+ok("plain prose → no citations",
+  #parse.find_refs_in_line("The Lord is my shepherd.") == 0)
+ok("digits without a book → no citations",
+  #parse.find_refs_in_line("3:1 is not a reference") == 0)
+
+-- ---------------------------------------------------------------------------
+-- Tests: Document navigation (parse.find_ref_near, F2)
+-- ---------------------------------------------------------------------------
+section("Document Navigation (find_ref_near)")
+
+local nav_buf = vim.api.nvim_create_buf(false, true)
+vim.api.nvim_buf_set_lines(nav_buf, 0, -1, false, {
+  "Jas 1:1 opens; 1 Cor 4:2 follows.",
+  "",
+  "Gen 1:1 closes the set.",
+})
+
+local function near(line, col, dir)
+  return parse.find_ref_near(nav_buf, line, col, dir)
+end
+
+local function expect_nav(name, line, col, dir, exp_line, exp_col, exp_book)
+  local r = near(line, col, dir)
+  ok(name,
+    r ~= nil and r.line == exp_line and r.col == exp_col and r.ref.book == exp_book,
+    r == nil and "returned nil" or
+      string.format("got line %s col %s book %s (want line %s col %s book %s)",
+        tostring(r.line), tostring(r.col), tostring(r.ref.book),
+        tostring(exp_line), tostring(exp_col), exp_book))
+end
+
+local function expect_nil(name, line, col, dir)
+  local r = near(line, col, dir)
+  ok(name, r == nil,
+    r == nil and "" or
+      string.format("got line %s book %s", tostring(r.line), tostring(r.ref.book)))
+end
+
+-- Line 1: "Jas 1:1" spans bytes 1–7; "1 Cor 4:2" spans bytes 16–24.
+-- Line 3: "Gen 1:1" spans bytes 1–7.
+expect_nav("next on-line (cursor before both) → 1 Cor 4:2",
+  1, 0, 1, 1, 15, "1 Corinthians")
+expect_nav("next on-line (cursor just past 'Jas 1:1') → 1 Cor 4:2",
+  1, 7, 1, 1, 15, "1 Corinthians")
+expect_nav("next cross-line (past line 1) → Gen 1:1",
+  1, 24, 1, 3, 0, "Genesis")
+expect_nav("next from a blank line → Gen 1:1",
+  2, 0, 1, 3, 0, "Genesis")
+expect_nav("prev on-line (cursor at line end) → 1 Cor 4:2",
+  1, 24, -1, 1, 15, "1 Corinthians")
+expect_nav("prev on-line (cursor between citations) → Jas 1:1",
+  1, 8, -1, 1, 0, "James")
+expect_nav("prev just after 'Gen 1:1' → Gen 1:1 itself",
+  3, 7, -1, 3, 0, "Genesis")
+expect_nav("prev cross-line (start of line 3) → last citation of line 1",
+  3, 0, -1, 1, 15, "1 Corinthians")
+expect_nav("prev from a blank line → last citation of line 1",
+  2, 0, -1, 1, 15, "1 Corinthians")
+expect_nil("prev before the first citation → nil", 1, 0, -1)
+expect_nil("next after the last citation → nil", 3, 19, 1)
+
+vim.api.nvim_buf_delete(nav_buf, { force = true })
+
+-- ---------------------------------------------------------------------------
+-- Tests: Verse stepping (db.next_verse / prev_verse, F2)
+-- ---------------------------------------------------------------------------
+section("Verse Stepping (db.next_verse / prev_verse)")
+
+local db = require("bible_ref.db")
+
+local vdir = vim.fn.tempname()
+assert(vim.fn.mkdir(vdir, "p") == 1)
+write_at(vdir, "bible_web2.json", {
+  ["James 1:1"]         = "WEB2: James 1:1.",
+  ["James 1:2"]         = "WEB2: James 1:2.",
+  ["James 1:3"]         = "WEB2: James 1:3.",
+  ["James 2:1"]         = "WEB2: James 2:1.",
+  ["James 2:2"]         = "WEB2: James 2:2.",
+  ["James 2:3"]         = "WEB2: James 2:3.",
+  ["1 Corinthians 4:2"] = "WEB2: 1 Corinthians 4:2.",
+  ["1 Corinthians 4:3"] = "WEB2: 1 Corinthians 4:3.",
+  ["1 Corinthians 5:1"] = "WEB2: 1 Corinthians 5:1.",
+})
+write_at(vdir, "bible_testb2.json", {
+  -- Deliberately partial: no James ch. 2, no 1 Cor 4:3 / 5:1.
+  ["James 1:1"]         = "TESTB2: James 1:1.",
+  ["James 1:2"]         = "TESTB2: James 1:2.",
+  ["James 1:3"]         = "TESTB2: James 1:3.",
+  ["1 Corinthians 4:2"] = "TESTB2: 1 Corinthians 4:2.",
+})
+cfg.setup({ data_dir = vdir })
+
+local function fmt(r)
+  return r
+    and (r.book .. " " .. tostring(r.chapter) .. ":" .. tostring(r.verse_start))
+    or "nil"
+end
+
+local function step_test(name, got, exp_book, exp_ch, exp_vs)
+  ok(name,
+    got ~= nil and got.book == exp_book
+      and got.chapter == exp_ch and got.verse_start == exp_vs,
+    "got " .. fmt(got) .. " (want "
+      .. exp_book .. " " .. tostring(exp_ch) .. ":" .. tostring(exp_vs) .. ")")
+end
+
+local function step_nil(name, got)
+  ok(name, got == nil, "got " .. fmt(got))
+end
+
+step_test("next: Jas 1:2 → 1:3",
+  db.next_verse({ book = "James", chapter = 1, verse_start = 2 }, "WEB2"),
+  "James", 1, 3)
+step_test("next: range 1:1–3 steps from its end → 2:1",
+  db.next_verse({ book = "James", chapter = 1, verse_start = 1, verse_end = 3 }, "WEB2"),
+  "James", 2, 1)
+step_test("next: 1 Cor 4:2 → 4:3",
+  db.next_verse({ book = "1 Corinthians", chapter = 4, verse_start = 2 }, "WEB2"),
+  "1 Corinthians", 4, 3)
+step_test("next: 1 Cor 4:3 → 5:1 (chapter wrap)",
+  db.next_verse({ book = "1 Corinthians", chapter = 4, verse_start = 3 }, "WEB2"),
+  "1 Corinthians", 5, 1)
+step_nil("next: book end (Jas 2:3) → nil",
+  db.next_verse({ book = "James", chapter = 2, verse_start = 3 }, "WEB2"))
+step_nil("next: book end (1 Cor 5:1) → nil",
+  db.next_verse({ book = "1 Corinthians", chapter = 5, verse_start = 1 }, "WEB2"))
+step_nil("next: absent book (Genesis) → nil",
+  db.next_verse({ book = "Genesis", chapter = 1, verse_start = 1 }, "WEB2"))
+
+step_test("prev: Jas 1:2 → 1:1",
+  db.prev_verse({ book = "James", chapter = 1, verse_start = 2 }, "WEB2"),
+  "James", 1, 1)
+step_test("prev: range 1:2–3 → 1:1 (verse before range start)",
+  db.prev_verse({ book = "James", chapter = 1, verse_start = 2, verse_end = 3 }, "WEB2"),
+  "James", 1, 1)
+step_test("prev: Jas 2:1 → 1:3 (chapter wrap to last verse)",
+  db.prev_verse({ book = "James", chapter = 2, verse_start = 1 }, "WEB2"),
+  "James", 1, 3)
+step_nil("prev: book start (Jas 1:1) → nil",
+  db.prev_verse({ book = "James", chapter = 1, verse_start = 1 }, "WEB2"))
+step_nil("prev: absent book (Genesis) → nil",
+  db.prev_verse({ book = "Genesis", chapter = 1, verse_start = 1 }, "WEB2"))
+
+-- Partial dataset: stepping is bounded by what the dataset contains.
+step_test("partial: TESTB2 Jas 1:2 → 1:3",
+  db.next_verse({ book = "James", chapter = 1, verse_start = 2 }, "TESTB2"),
+  "James", 1, 3)
+step_nil("partial: TESTB2 Jas 1:3 → nil (ch. 2 absent in dataset)",
+  db.next_verse({ book = "James", chapter = 1, verse_start = 3 }, "TESTB2"))
+step_nil("partial: TESTB2 1 Cor 4:2 → nil (4:3 absent in dataset)",
+  db.next_verse({ book = "1 Corinthians", chapter = 4, verse_start = 2 }, "TESTB2"))
+step_nil("partial: TESTB2 Jas 1:1 → nil (book start)",
+  db.prev_verse({ book = "James", chapter = 1, verse_start = 1 }, "TESTB2"))
+
+ok("max_chapter(James, WEB2) = 2", db.max_chapter("James", "WEB2") == 2,
+  "got: " .. tostring(db.max_chapter("James", "WEB2")))
+ok("max_verse(James, 2, WEB2) = 3", db.max_verse("James", 2, "WEB2") == 3,
+  "got: " .. tostring(db.max_verse("James", 2, "WEB2")))
+ok("max_chapter(Genesis, WEB2) = nil (absent book)",
+  db.max_chapter("Genesis", "WEB2") == nil)
+ok("max_verse(James, 99, WEB2) = nil (absent chapter)",
+  db.max_verse("James", 99, "WEB2") == nil)
+
+-- Omitted tag resolves to the active version.
+cfg.set_version("WEB2")
+step_test("omitted tag uses the active version (Jas 1:2 → 1:3)",
+  db.next_verse({ book = "James", chapter = 1, verse_start = 2 }),
+  "James", 1, 3)
+
+-- Cleanup temp dir
+vim.fn.delete(vdir, "rf")
+
+-- ---------------------------------------------------------------------------
 -- Summary
 -- ---------------------------------------------------------------------------
 io.write(string.format(

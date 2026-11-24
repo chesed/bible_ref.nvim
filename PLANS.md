@@ -4,7 +4,7 @@ Living work queue for `bible_ref.nvim`. Newest items on top. Check items off
 when fixed/shipped, and add a line to the **Notes** field of each item describing
 what was done (or why it was deferred).
 
-**Last updated:** 2026-11-23
+**Last updated:** 2026-11-24
 **Status legend:** `[ ]` open · `[x]` done (add date + note)
 
 ---
@@ -91,6 +91,21 @@ what was done (or why it was deferred).
     (a direct sibling of bug B1 — B1's span logic in `parse.ref_at_cursor()`
     now exists and is the natural basis for a multi-citation line scanner).
   - **Notes:**
+    - 2026-11-24: implemented on `feature/f2-float-keymaps` (uncommitted):
+      `parse.lua` gained a shared `scan_refs()` line scanner (deduped by span
+      finish, left-to-right), public `find_refs_in_line()`, and
+      `find_ref_near(buf, line, col, direction)` for document navigation;
+      `ref_at_cursor()` now reuses the same scanner. `db.lua` gained
+      `max_chapter()` / `max_verse()` plus `next_verse()` / `prev_verse()`
+      (ranges step from the range's end/start; wrap chapters; nil at book
+      edges). `float.lua` rebinds: `h`/`l` = prev/next citation (display),
+      `H`/`L` = jump cursor (float re-anchors, version preserved), `j`/`k` =
+      prev/next canonical verse, `o` = open (Logos moved off `l`).
+      Test coverage added in `tests/run_tests.lua` (3 new sections: Line
+      Scanning, Document Navigation, Verse Stepping — incl. partial datasets,
+      chapter wrap, book edges, cross-line navigation). Suite: 125 passed,
+      0 failed; headless smoke of all float keymaps passes. Awaiting: user
+      review + commit (R5).
 
 - [ ] **F3 — Expanded corpora (ordered roadmap)**
   - **Reported:** 2026-11-23 (user)
@@ -176,5 +191,5 @@ what was done (or why it was deferred).
 
 Per `AGENT_INSTRUCTIONS.md` §8 and `NVIM_CONFIG.md`: no code changes without
 approval; no commits without approval; data files are the user's; every fix
-gets `luac -p` + the 84-test suite + a targeted smoke check before it's called
+gets `luac -p` + the 125-test suite + a targeted smoke check before it's called
 done.

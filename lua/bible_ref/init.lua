@@ -37,9 +37,9 @@ local DEFAULTS = {
 
   --- Keymaps to register globally (set to false to disable auto-keymaps)
   keymaps = {
-    hover      = "<leader>bh",   -- BibleHover
-    pick       = "<leader>bp",   -- BiblePick
-    open_logos = "<leader>bl",   -- BibleOpenLogos
+    hover      = "<leader>rh",   -- BibleHover
+    pick       = "<leader>rp",   -- BiblePick
+    open_logos = "<leader>ro",   -- BibleOpenLogos
   },
 
   --- Which filetypes to restrict keymaps to (empty = all filetypes)
@@ -159,7 +159,7 @@ end
 ---
 --- Example (auto-discovery of <plugin_root>/data):
 ---   require("bible_ref").setup({
----     keymaps = { hover = "<leader>bh", pick = "<leader>bp" },
+---     keymaps = { hover = "<leader>rh", pick = "<leader>rp" },
 ---   })
 ---
 --- Example (explicit datasets):

@@ -13,7 +13,10 @@ A modular Neovim Lua plugin for Bible reference inspection and SBL-style citatio
 - **`:BibleHover`** — Inspect any Bible reference under the cursor in an LSP-style floating window.
   - `<Space>` / `<Tab>` — next installed translation
   - `<S-Tab>` — previous translation (wraps around)
-  - `l` — open the passage in Logos
+  - `h` / `l` — previous / next citation in the document (display only)
+  - `H` / `L` — jump the cursor to the previous / next citation (float re-anchors)
+  - `j` / `k` — next / previous canonical verse (wraps chapters, stops at book edges)
+  - `o` — open the passage in Logos
   - `q` / `<Esc>` — close
 - **`:BiblePick`** — Fuzzy-search all verses of the active dataset (`fzf-lua` primary, `vim.ui.select` fallback) and insert an SBL-formatted abbreviation at the cursor (`Jas 1:1`, `1 Cor 4:2`, …).
   - `TAB` — cycle to the next dataset (picker reopens with the new dataset)
@@ -52,9 +55,9 @@ Understands a wide range of reference formats:
   config = function()
     require("bible_ref").setup({
       keymaps = {
-        hover      = "<leader>bh",
-        pick       = "<leader>bp",
-        open_logos = "<leader>bl",
+        hover      = "<leader>rh",
+        pick       = "<leader>rp",
+        open_logos = "<leader>ro",
       },
     })
   end,
@@ -121,9 +124,9 @@ Default keymaps can be changed via config options.
 
 | Keymap       | Command            | Action                               |
 |--------------|--------------------|--------------------------------------|
-| `<leader>bh` | `:BibleHover`      | Show verse preview under cursor      |
-| `<leader>bp` | `:BiblePick`       | Open fuzzy verse picker              |
-| `<leader>bl` | `:BibleOpenLogos`  | Open reference in Logos.com          |
+| `<leader>rh` | `:BibleHover`      | Show verse preview under cursor      |
+| `<leader>rp` | `:BiblePick`       | Open fuzzy verse picker              |
+| `<leader>ro` | `:BibleOpenLogos`  | Open reference in Logos.com          |
 
 ### In the floating preview window
 
@@ -131,7 +134,10 @@ Default keymaps can be changed via config options.
 |--------------|-------------------------------------------------|
 | `<Space>`,`<Tab>` | Next translation (wraps)                  |
 | `<S-Tab>`    | Previous translation (wraps)                   |
-| `l`          | Open passage in Logos.com                      |
+| `h` / `l`    | Previous / next citation in the document       |
+| `H` / `L`    | Jump cursor to previous / next citation        |
+| `j` / `k`    | Next / previous canonical verse (stops at book edges) |
+| `o`          | Open passage in Logos.com                      |
 | `q`/`<Esc>`  | Close preview                                  |
 
 The window header shows the reference and the active tag: `Jas 3:1  [Version: KJV]`.
@@ -174,9 +180,9 @@ require("bible_ref").setup({
 
   -- Global keymap bindings (set any to false to disable)
   keymaps = {
-    hover      = "<leader>bh",
-    pick       = "<leader>bp",
-    open_logos = "<leader>bl",
+    hover      = "<leader>rh",
+    pick       = "<leader>rp",
+    open_logos = "<leader>ro",
   },
 
   -- Which filetypes to restrict keymaps to (empty = all)

@@ -135,10 +135,14 @@ tests/run_tests.lua  Hermetic unit suite (no external test framework)
 | `:BibleVersion [tag]` | No arg: list + mark active. Arg: `set_version(tag)` |
 | `:BibleOpenLogos` | `logos.open(sbl.format(ref))` |
 
-Global defaults: `<leader>bh` / `<leader>bp` / `<leader>bl` (all configurable,
+Global defaults: `<leader>rh` / `<leader>rp` / `<leader>ro` (all configurable,
 all disable-able via `setup({ keymaps = ... })`).
 
-Float: `<Space>`/`<Tab>` next · `<S-Tab>` prev · `l` Logos · `q`/`<Esc>` close.
+Float: `<Space>`/`<Tab>` next · `<S-Tab>` prev · `h`/`l` prev/next citation in
+document (display) · `H`/`L` jump cursor to prev/next citation (float re-anchors,
+version preserved) · `j`/`k` next/prev canonical verse (wraps chapters, stops at
+book edges with a notice) · `o` open (Logos, until the Open-logic item ships) ·
+`q`/`<Esc>` close.
 Picker: `<CR>` insert · `<C-v>` next dataset (code binding; the user maps TAB
 on their side — B2 closed user-side) · `<C-l>`/`<C-o>` Logos.
 
@@ -148,7 +152,7 @@ on their side — B2 closed user-side) · `<C-l>`/`<C-o>` Logos.
 
 ```bash
 luac -p lua/bible_ref/*.lua lua/bible_ref/ui/*.lua tests/run_tests.lua
-nvim --headless -u NONE -l tests/run_tests.lua     # expect "84 passed, 0 failed"
+nvim --headless -u NONE -l tests/run_tests.lua     # expect "125 passed, 0 failed"
 ```
 
 Then, for UI-touching changes, headless smoke tests that drive the **real**
@@ -219,9 +223,9 @@ R1–R4 done). Everything still open is post-release backlog in
 **[PLANS.md](PLANS.md)**:
 
 - **Features:** F1 picker `<S-Return>` copy-verse-text · F2 float
-  prev/next-citation navigation (h/l/H/L per the user's keymap decision) ·
-  F3 expanded corpora in order: apocrypha → church fathers → pseudepigrapha →
-  Qumran.
+  prev/next-citation + verse navigation (implemented 2026-11-24, uncommitted —
+  awaiting user review; see PLANS.md) · F3 expanded corpora in order:
+  apocrypha → church fathers → pseudepigrapha → Qumran.
 - **Open logic:** decouple "open" from Logos — biblia.com default,
   app.logos.com as an option.
 
