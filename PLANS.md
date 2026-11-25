@@ -111,7 +111,9 @@ what was done (or why it was deferred).
     - User decision: unbind l from "logos" (we want to make logos an option not the default anyway) and bind it to o ("open") instead.
     - Keybindings should follow vim conventions: j for next canonical verse, k for previous canonical verse, h for previous verse mentioned in the document, l for next verse mentioned in the document.
     - And how about: shift-l JUMPS to the next verse, shift-h JUMPS to the previous verse (where the normal h and l just DISPLAY it in hover)
-  - **Open decision (user):** confirm the h/l assignment and where Logos moves.
+  - **Resolved (user, 2026-11-23):** `l` unbound from Logos — `o` = open;
+    `h`/`l` = prev/next citation (display), `j`/`k` = prev/next verse,
+    `H`/`L` = jump. See decision bullets above.
     Implementation note: requires a multi-citation line scanner in `parse.lua`
     (a direct sibling of bug B1 — B1's span logic in `parse.ref_at_cursor()`
     now exists and is the natural basis for a multi-citation line scanner).
