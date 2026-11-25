@@ -4,12 +4,31 @@ Living work queue for `bible_ref.nvim`. Newest items on top. Check items off
 when fixed/shipped, and add a line to the **Notes** field of each item describing
 what was done (or why it was deferred).
 
-**Last updated:** 2026-11-23
+**Last updated:** 2026-11-24
 **Status legend:** `[ ]` open · `[x]` done (add date + note)
 
 ---
 
 ## Bugs
+
+- [ ] **B4 — Multi-citation carry-over (bare `C:V` / `V` after `;` or `,`) is not parsed** — **TOP PRIORITY**
+  - **Filed:** 2026-11-24 (user). Shelved from active work; first priority when resumed.
+  - **Symptom:** Citations without a book name after a comma or semicolon are
+    dropped. `Rev. 16:13; 18:19` → only `Rev 16:13` parses; `18:19` is lost.
+    `Galatians 2:5, 7; 4:12` → only `Gal 2:5` resolves.
+  - **Spec:** bare `C:V` following `;` or `,` inherits the most recently named
+    book; bare `V` inherits book *and* chapter from the latest full citation.
+    Acceptance: `Rev. 16:13; 18:19` → `Rev 16:13, Rev 18:19`;
+    `Galatians 2:5, 7; 4:12` → `Gal 2:5, Gal 2:7, Gal 4:12`.
+  - **Location:** `lua/bible_ref/parse.lua` — `if #book_words == 0 then
+    return nil end` (~L325) is the blocker; `find_refs_in_line` must then
+    return one span per resolved citation.
+  - **History:** first attempt delegated to the ttop sub-agent (2026-11-24) —
+    failed catastrophically: rewrote `parse.lua` with a syntax error (E5113)
+    and **fabricated content** (aliases for "3–12 Corinthians," books that do
+    not exist), and rewrote the test harness (590 lines deleted). Both files
+    restored from `4942c18`. See the ttop note in AGENT_INSTRUCTIONS.md.
+  - **Notes:**
 
 - [x] **B1 — Hover on a line with multiple citations resolves the *previous* reference** (fixed 2026-11-23)
   - **Fixed:** `parse.ref_at_cursor()` is now span-aware: every candidate that
@@ -63,19 +82,25 @@ what was done (or why it was deferred).
 
 ## Features
 
-- [ ] **F1 — Picker: `<S-Return>` copies the verse *text* (clipboard action)**
+- [x] **F1 — Picker: verse *text* insertion** (shipped 2026-11-24, v1.1 — as `<C-y>`, not `<S-Return>`)
   - **Reported:** 2026-11-23 (user)
   - **Idea:** Shift+Enter on a highlighted picker entry copies the verse text to
     the system clipboard instead of inserting the reference. Possible extensions:
     copy with SBL ref prefix, copy in a specific version, insert the text rather
     than the ref.
   - **Constraint:** fzf-lua backend only — `vim.ui.select` cannot take extra
-    keys. Decide behavior (notify) when the backend is `select`.
-  - **Open decision (user):** exact payload (bare text? `Jas 3:1 — text`? which
-    version?) and whether an *insert-text* mode is wanted too.
+    keys.
+  - **Shipped as:** `<C-y>` inserts the quoted verse text + reference at the
+    cursor — `"And the dragon stood on the shore of the sea." (Rev 18:19)` —
+    via `insert_text_with_ref()` in `picker.lua` (the single formatting point;
+    falls back to the plain reference when the entry has no text). Key changed
+    from `<S-Return>` to `<C-y>` per user choice — Shift+Enter emits the same
+    byte as Enter in most terminals.
+  - **Deferred (user: "add options later"):** formatting options (curly vs
+    straight quotes, ref-only/text-only variants).
   - **Notes:**
 
-- [ ] **F2 — Float: previous / next citation and previous / next verse navigation in the document**
+- [x] **F2 — Float: previous / next citation and previous / next verse navigation in the document** (implemented 2026-11-24, committed `4942c18`, v1.1)
   - **Reported:** 2026-11-23 (user)
   - **Idea:** `h` = previous citation in the text, `l` = next citation; the float
     follows the cursor's target reference and shows it. Also: j navigates to the next verse in the bible, k to the previous verse.
@@ -86,11 +111,28 @@ what was done (or why it was deferred).
     - User decision: unbind l from "logos" (we want to make logos an option not the default anyway) and bind it to o ("open") instead.
     - Keybindings should follow vim conventions: j for next canonical verse, k for previous canonical verse, h for previous verse mentioned in the document, l for next verse mentioned in the document.
     - And how about: shift-l JUMPS to the next verse, shift-h JUMPS to the previous verse (where the normal h and l just DISPLAY it in hover)
-  - **Open decision (user):** confirm the h/l assignment and where Logos moves.
+  - **Resolved (user, 2026-11-23):** `l` unbound from Logos — `o` = open;
+    `h`/`l` = prev/next citation (display), `j`/`k` = prev/next verse,
+    `H`/`L` = jump. See decision bullets above.
     Implementation note: requires a multi-citation line scanner in `parse.lua`
     (a direct sibling of bug B1 — B1's span logic in `parse.ref_at_cursor()`
     now exists and is the natural basis for a multi-citation line scanner).
   - **Notes:**
+    - 2026-11-24: implemented on `feature/f2-float-keymaps` (uncommitted):
+      `parse.lua` gained a shared `scan_refs()` line scanner (deduped by span
+      finish, left-to-right), public `find_refs_in_line()`, and
+      `find_ref_near(buf, line, col, direction)` for document navigation;
+      `ref_at_cursor()` now reuses the same scanner. `db.lua` gained
+      `max_chapter()` / `max_verse()` plus `next_verse()` / `prev_verse()`
+      (ranges step from the range's end/start; wrap chapters; nil at book
+      edges). `float.lua` rebinds: `h`/`l` = prev/next citation (display),
+      `H`/`L` = jump cursor (float re-anchors, version preserved), `j`/`k` =
+      prev/next canonical verse, `o` = open (Logos moved off `l`).
+      Test coverage added in `tests/run_tests.lua` (3 new sections: Line
+      Scanning, Document Navigation, Verse Stepping — incl. partial datasets,
+      chapter wrap, book edges, cross-line navigation). Suite: 125 passed,
+      0 failed; headless smoke of all float keymaps passes. Committed
+      `4942c18`; ships in v1.1.
 
 - [ ] **F3 — Expanded corpora (ordered roadmap)**
   - **Reported:** 2026-11-23 (user)
@@ -161,10 +203,19 @@ what was done (or why it was deferred).
     default (`config.get_default_version_index()`), not `versions[1]`.
   - **Notes:** shipped `data/` is now KJV + WEB (default) + WLC-SBLGNT.
 
-- [ ] **R5 — v1.0 publish (user handoff)**
+- [x] **R5 — v1.0 publish (user handoff)** (done 2026-11-23)
   - All release blockers closed (B1, R1, R2, R3, R4; 84/84 suite). The user
     commits (with `v1.0` tag), merges the feature branch, and publishes.
   - **Notes:** agent makes no commits; `data/user/` never enters the commit.
+    Shipped: `master` @ `c263293`, tag `v1.0`, pushed to origin.
+
+- [ ] **R6 — v1.1 publish (user handoff)** (2026-11-24)
+  - **Contents:** F2 citation navigation + `<leader>r*` keymaps (`4942c18`) ·
+    hover fallback to the first ref on the line · `<C-y>` verse-text insertion
+    (F1) · docs pass (README, PLANS, AGENT_INSTRUCTIONS). Suite 125/125.
+  - User commits with the `v1.1` tag and publishes.
+  - **Notes:** B4 (carry-over parsing) is **explicitly not in v1.1** — shelved
+    2026-11-24 as the top-priority post-release bug.
 
 ## Backlog / parked
 
@@ -176,5 +227,5 @@ what was done (or why it was deferred).
 
 Per `AGENT_INSTRUCTIONS.md` §8 and `NVIM_CONFIG.md`: no code changes without
 approval; no commits without approval; data files are the user's; every fix
-gets `luac -p` + the 84-test suite + a targeted smoke check before it's called
+gets `luac -p` + the 125-test suite + a targeted smoke check before it's called
 done.

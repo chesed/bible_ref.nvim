@@ -37,9 +37,9 @@ local DEFAULTS = {
 
   --- Keymaps to register globally (set to false to disable auto-keymaps)
   keymaps = {
-    hover      = "<leader>bh",   -- BibleHover
-    pick       = "<leader>bp",   -- BiblePick
-    open_logos = "<leader>bl",   -- BibleOpenLogos
+    hover      = "<leader>rh",   -- BibleHover
+    pick       = "<leader>rp",   -- BiblePick
+    open_logos = "<leader>ro",   -- BibleOpenLogos
   },
 
   --- Which filetypes to restrict keymaps to (empty = all filetypes)
@@ -60,16 +60,40 @@ local function plugin_root()
   return vim.fn.fnamemodify(src, ":h:h:h")
 end
 
+--- Resolve the reference under the cursor, falling back to the FIRST reference
+--- on the line when nothing is directly under the cursor. The cursor is moved
+--- onto that reference's span before returning, so any follow-up navigation
+--- (h/l stepping, verse stepping) starts there.
+---@return table? ref  Structured reference, or nil if the line has none.
+local function resolve_ref_with_fallback()
+  local parse = require("bible_ref.parse")
+
+  local ref = parse.ref_at_cursor()
+  if ref then return ref end
+
+  -- No reference under the cursor: fall back to the first reference on the
+  -- line (if any), and move the cursor onto it.
+  local line = vim.api.nvim_win_get_cursor(0)[1]
+  local buf  = vim.api.nvim_get_current_buf()
+  local text = vim.api.nvim_buf_get_line(buf, line - 1)
+  local refs = parse.find_refs_in_line(text)
+  if not refs or #refs == 0 then return nil end
+
+  local first = refs[1]
+  -- Cursor column is a 0-based byte offset; `start` is a 1-based byte offset.
+  pcall(vim.api.nvim_win_set_cursor, 0, { line, first.start - 1 })
+  return first.ref
+end
+
 --- Register the user commands.
 local function register_commands()
   -- :BibleHover — inspect reference under cursor (active dataset version)
   vim.api.nvim_create_user_command("BibleHover", function()
-    local parse = require("bible_ref.parse")
     local float = require("bible_ref.ui.float")
 
-    local ref = parse.ref_at_cursor()
+    local ref = resolve_ref_with_fallback()
     if not ref then
-      vim.notify("[bible_ref] No Bible reference found under cursor", vim.log.levels.INFO)
+      vim.notify("[bible_ref] No Bible reference found on this line", vim.log.levels.INFO)
       return
     end
 
@@ -159,7 +183,7 @@ end
 ---
 --- Example (auto-discovery of <plugin_root>/data):
 ---   require("bible_ref").setup({
----     keymaps = { hover = "<leader>bh", pick = "<leader>bp" },
+---     keymaps = { hover = "<leader>rh", pick = "<leader>rp" },
 ---   })
 ---
 --- Example (explicit datasets):

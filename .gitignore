@@ -8,6 +8,7 @@ scripts/
 data/*.py
 data/archived_bibles/
 ./AGENT_INSTRUCTIONS.md
+./PLANS.md
 
 # --- Scratch & logs ----------------------------------------------------------
 *.log

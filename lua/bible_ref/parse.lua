@@ -388,6 +388,73 @@ function M.parse(s)
 end
 
 -- ---------------------------------------------------------------------------
+-- Line scanning (shared by cursor extraction and document navigation)
+-- ---------------------------------------------------------------------------
+
+--- Extract every parseable reference in `line[from, to]` together with its
+--- span in 1-based line byte coordinates, in left-to-right order.
+---
+--- The same token is discoverable from several offsets (e.g. with a leading
+--- parenthesis, or from a book-name prefix that also resolves), so results
+--- are deduplicated by span finish — two distinct citations can never end
+--- on the same byte, but one token can start at several. The leftmost
+--- discovery of a token wins.
+---@param line string
+---@param from number 1-based start offset
+---@param to number 1-based end offset
+---@return { { ref: table, start: number, finish: number } }[]
+local function scan_refs(line, from, to)
+  local by_finish = {}
+  for s_off = from, to do
+    local candidate = line:sub(s_off, to)
+    -- strip leading non-reference chars (open brackets, backslashes, spaces)
+    local stripped = candidate:gsub("^[%s%(%)%[%]{}\\]+", "")
+    if #stripped == 0 then break end
+    local ref = try_parse(stripped)
+    if ref then
+      -- Locate the token's span in line byte coordinates. It starts at the
+      -- first unstripped byte and ends at its chapter:verse part (plus any
+      -- verse range, if present).
+      local strip_len   = #candidate - #stripped
+      local span_start  = s_off + strip_len
+      local span_finish = span_start
+      local cv     = tostring(ref.chapter) .. ":" .. tostring(ref.verse_start)
+      local cv_pos = stripped:find(cv, 1, true)
+      if cv_pos then
+        span_finish = span_start + cv_pos + #cv - 2
+        if ref.verse_end then
+          local rest  = stripped:sub(cv_pos + #cv)
+          local range = rest:match("^(%-%d+)")
+                      or rest:match("^\xE2\x80\x93%d+")
+                      or rest:match("^\xE2\x80\x94%d+")
+          if range then span_finish = span_finish + #range end
+        end
+      end
+
+      if not by_finish[span_finish] then
+        by_finish[span_finish] = { ref = ref, start = span_start, finish = span_finish }
+      end
+    end
+  end
+
+  local results = {}
+  for _, e in pairs(by_finish) do
+    results[#results + 1] = e
+  end
+  table.sort(results, function(a, b) return a.start < b.start end)
+  return results
+end
+
+--- All parseable references on a line, with their spans in 1-based line
+--- byte coordinates, in left-to-right order.
+---@param line string
+---@return { { ref: table, start: number, finish: number } }[]
+function M.find_refs_in_line(line)
+  line = line or ""
+  return scan_refs(line, 1, #line)
+end
+
+-- ---------------------------------------------------------------------------
 -- Cursor extraction
 -- ---------------------------------------------------------------------------
 
@@ -409,7 +476,6 @@ function M.ref_at_cursor()
   -- forward for the end (up to 20 bytes), then try substrings.
   local win_start = math.max(1, col - 40 + 1)  -- 1-indexed
   local win_end   = math.min(#line, col + 20 + 1)
-  local region    = line:sub(win_start, win_end)
 
   -- Cursor position in 1-based line byte coordinates.
   local cursor = col + 1
@@ -419,49 +485,92 @@ function M.ref_at_cursor()
   -- dist > 0 ⇒ distance to the nearest edge of the span.
   local best = nil
 
-  for s_off = 1, #region do
-    local candidate = region:sub(s_off)
-    -- strip leading non-reference chars (open brackets, backslashes, spaces)
-    local stripped = candidate:gsub("^[%s%(%)%[%]{}\\]+", "")
-    if #stripped == 0 then break end
-    local ref = try_parse(stripped)
-    if ref then
-      -- Locate the token's span in line byte coordinates. It starts at the
-      -- first unstripped byte and ends at its chapter:verse part (plus any
-      -- verse range, if present).
-      local strip_len   = #candidate - #stripped
-      local span_start  = win_start + (s_off - 1) + strip_len
-      local span_finish = span_start
-      local cv     = tostring(ref.chapter) .. ":" .. tostring(ref.verse_start)
-      local cv_pos = stripped:find(cv, 1, true)
-      if cv_pos then
-        span_finish = span_start + cv_pos + #cv - 2
-        if ref.verse_end then
-          local rest  = stripped:sub(cv_pos + #cv)
-          local range = rest:match("^(%-%d+)")
-                      or rest:match("^\xE2\x80\x93%d+")
-                      or rest:match("^\xE2\x80\x94%d+")
-          if range then span_finish = span_finish + #range end
-        end
-      end
+  for _, r in ipairs(scan_refs(line, win_start, win_end)) do
+    local dist
+    if cursor < r.start then
+      dist = r.start - cursor
+    elseif cursor > r.finish then
+      dist = cursor - r.finish
+    else
+      dist = 0
+    end
 
-      local dist
-      if cursor < span_start then
-        dist = span_start - cursor
-      elseif cursor > span_finish then
-        dist = cursor - span_finish
-      else
-        dist = 0
-      end
-
-      -- Strict < keeps the leftmost candidate on ties (deterministic).
-      if not best or dist < best.dist then
-        best = { ref = ref, dist = dist }
-      end
+    -- Strict < keeps the leftmost candidate on ties (deterministic).
+    if not best or dist < best.dist then
+      best = { ref = r.ref, dist = dist }
     end
   end
 
   return best and best.ref or nil
+end
+
+-- ---------------------------------------------------------------------------
+-- Document navigation (F2)
+-- ---------------------------------------------------------------------------
+
+--- Find the next (direction > 0) or previous (direction < 0) citation in
+--- buffer `buf`, relative to the given position.
+---
+--- On the starting line: the first citation beginning strictly *after* the
+--- position (next), or the last citation ending strictly *before* it
+--- (previous). When the starting line has no further citation, the scan
+--- continues line by line in the given direction.
+---
+--- Positions use the nvim_win_set_cursor convention: 1-based line,
+--- 0-based byte column. The result carries the citation's span start.
+---@param buf number buffer handle
+---@param line number 1-based starting line
+---@param col number 0-based byte starting column
+---@param direction number +1 = next citation, -1 = previous citation
+---@return { line: number, col: number, ref: table }|nil
+function M.find_ref_near(buf, line, col, direction)
+  local nlines = vim.api.nvim_buf_line_count(buf)
+  local lines  = vim.api.nvim_buf_get_lines(buf, 0, nlines, false)
+  local cursor = col + 1 -- 1-based line byte coordinate
+  local lstr   = lines[line] or ""
+
+  -- Cheap pre-filter: every parseable citation contains "chapter:verse"
+  -- digits, so lines without any must be skipped without the full scan.
+  local function line_has_refs(s)
+    return s:match("%d+:%d+") ~= nil
+  end
+
+  if direction > 0 then
+    for _, r in ipairs(scan_refs(lstr, 1, #lstr)) do
+      if r.start > cursor then
+        return { line = line, col = r.start - 1, ref = r.ref }
+      end
+    end
+    for l = line + 1, nlines do
+      local l2 = lines[l]
+      if line_has_refs(l2) then
+        local refs = scan_refs(l2, 1, #l2)
+        if #refs > 0 then
+          return { line = l, col = refs[1].start - 1, ref = refs[1].ref }
+        end
+      end
+    end
+  else
+    local refs = scan_refs(lstr, 1, #lstr)
+    for i = #refs, 1, -1 do
+      local r = refs[i]
+      if r.finish < cursor then
+        return { line = line, col = r.start - 1, ref = r.ref }
+      end
+    end
+    for l = line - 1, 1, -1 do
+      local l2 = lines[l]
+      if line_has_refs(l2) then
+        local lrefs = scan_refs(l2, 1, #l2)
+        local last  = lrefs[#lrefs]
+        if last then
+          return { line = l, col = last.start - 1, ref = last.ref }
+        end
+      end
+    end
+  end
+
+  return nil
 end
 
 return M

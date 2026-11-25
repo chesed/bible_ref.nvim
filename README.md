@@ -2,22 +2,28 @@
 
 A modular Neovim Lua plugin for Bible reference inspection and SBL-style citation insertion. Designed for Markdown, LaTeX, and plain-text theological writing.
 
-> **Status (2026-11-23):** v1.0 — first public release. Multi-version dataset
+> **Status (2026-11-24):** v1.1 — citation navigation in the hover window
+> (`h`/`l`/`H`/`L`/`j`/`k`), hover fallback to the first reference on the
+> line, and `<C-y>` verse-text insertion in the picker. Multi-version dataset
 > support: automatic discovery of every translation in `data/` and `data/user/`,
 > lazy per-version indexing, version cycling in both the hover window and the
 > picker, and span-aware hover on lines with multiple citations.
-> 84/84 headless unit tests passing.
+> 125/125 headless unit tests passing.
 
 ## Features
 
-- **`:BibleHover`** — Inspect any Bible reference under the cursor in an LSP-style floating window.
+- **`:BibleHover`** — Inspect any Bible reference under the cursor in an LSP-style floating window. No reference under the cursor? It falls back to the **first reference on the line** and moves the cursor there.
   - `<Space>` / `<Tab>` — next installed translation
   - `<S-Tab>` — previous translation (wraps around)
-  - `l` — open the passage in Logos
+  - `h` / `l` — previous / next citation in the document (display only)
+  - `H` / `L` — jump the cursor to the previous / next citation (float re-anchors)
+  - `j` / `k` — next / previous canonical verse (wraps chapters, stops at book edges)
+  - `o` — open the passage in Logos
   - `q` / `<Esc>` — close
 - **`:BiblePick`** — Fuzzy-search all verses of the active dataset (`fzf-lua` primary, `vim.ui.select` fallback) and insert an SBL-formatted abbreviation at the cursor (`Jas 1:1`, `1 Cor 4:2`, …).
   - `TAB` — cycle to the next dataset (picker reopens with the new dataset)
   - `<CR>` — insert the reference (optionally with the version tag)
+  - `<C-y>` — insert the quoted verse text + reference (e.g. `"And the dragon stood…" (Rev 18:19)`)
   - `<C-l>` / `<C-o>` — open the highlighted verse in Logos
 - **`:BibleVersion [tag]`** — Without arguments: list installed datasets and mark the active one. With an argument (`:BibleVersion KJV`): set it active. Case-insensitive.
 - **`:BibleOpenLogos`** — Open the reference under the cursor directly in Logos.com.
@@ -52,9 +58,9 @@ Understands a wide range of reference formats:
   config = function()
     require("bible_ref").setup({
       keymaps = {
-        hover      = "<leader>bh",
-        pick       = "<leader>bp",
-        open_logos = "<leader>bl",
+        hover      = "<leader>rh",
+        pick       = "<leader>rp",
+        open_logos = "<leader>ro",
       },
     })
   end,
@@ -121,9 +127,9 @@ Default keymaps can be changed via config options.
 
 | Keymap       | Command            | Action                               |
 |--------------|--------------------|--------------------------------------|
-| `<leader>bh` | `:BibleHover`      | Show verse preview under cursor      |
-| `<leader>bp` | `:BiblePick`       | Open fuzzy verse picker              |
-| `<leader>bl` | `:BibleOpenLogos`  | Open reference in Logos.com          |
+| `<leader>rh` | `:BibleHover`      | Show verse preview under cursor      |
+| `<leader>rp` | `:BiblePick`       | Open fuzzy verse picker              |
+| `<leader>ro` | `:BibleOpenLogos`  | Open reference in Logos.com          |
 
 ### In the floating preview window
 
@@ -131,7 +137,10 @@ Default keymaps can be changed via config options.
 |--------------|-------------------------------------------------|
 | `<Space>`,`<Tab>` | Next translation (wraps)                  |
 | `<S-Tab>`    | Previous translation (wraps)                   |
-| `l`          | Open passage in Logos.com                      |
+| `h` / `l`    | Previous / next citation in the document       |
+| `H` / `L`    | Jump cursor to previous / next citation        |
+| `j` / `k`    | Next / previous canonical verse (stops at book edges) |
+| `o`          | Open passage in Logos.com                      |
 | `q`/`<Esc>`  | Close preview                                  |
 
 The window header shows the reference and the active tag: `Jas 3:1  [Version: KJV]`.
@@ -141,6 +150,7 @@ The window header shows the reference and the active tag: `Jas 3:1  [Version: KJ
 | Key          | Action                                          |
 |--------------|-------------------------------------------------|
 | `<CR>`       | Insert SBL reference at cursor position         |
+| `<C-y>`      | Insert quoted verse text + reference            |
 | `<C-v>`      | Cycle dataset (prompt shows the new tag)        |
 | `<C-l>`/`<C-o>` | Open highlighted verse in Logos.com         |
 
@@ -174,9 +184,9 @@ require("bible_ref").setup({
 
   -- Global keymap bindings (set any to false to disable)
   keymaps = {
-    hover      = "<leader>bh",
-    pick       = "<leader>bp",
-    open_logos = "<leader>bl",
+    hover      = "<leader>rh",
+    pick       = "<leader>rp",
+    open_logos = "<leader>ro",
   },
 
   -- Which filetypes to restrict keymaps to (empty = all)
@@ -209,7 +219,7 @@ All 66 canonical books are mapped to SBL 2nd-edition standard abbreviations (no 
 
 ```bash
 luac -p lua/bible_ref/*.lua lua/bible_ref/ui/*.lua   # syntax
-nvim --headless -u NONE -l tests/run_tests.lua        # unit suite (84 tests)
+nvim --headless -u NONE -l tests/run_tests.lua        # unit suite (125 tests)
 ```
 
 The suite is **hermetic**: it builds its own temporary dataset directories
@@ -240,6 +250,6 @@ MIT — see [LICENSE](LICENSE).
 
 ## Roadmap
 
-See [PLANS.md](PLANS.md) for the post-release backlog (picker keymap
-redesign, expanded corpora: apocrypha → church fathers → pseudepigrapha →
-Qumran, and citation navigation).
+See [PLANS.md](PLANS.md) for the post-release backlog: multi-citation
+carry-over parsing (B4, top priority), expanded corpora (apocrypha → church
+fathers → pseudepigrapha → Qumran), and decoupling "open" from Logos.
